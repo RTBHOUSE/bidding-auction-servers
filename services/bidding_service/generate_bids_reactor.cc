@@ -626,8 +626,13 @@ void GenerateBidsReactor::EncryptResponseAndFinish(grpc::Status status) {
     status = grpc::Status(grpc::INTERNAL, kInternalServerError);
   }
 
-  metric_context_->SetRequestResult(server_common::ToAbslStatus(status));
+  PS_LOG(ERROR, log_context_)
+        << "Fake error for testing";
+  status = grpc::Status(grpc::INTERNAL, kInternalServerError);
 
+  if (status.error_code() != grpc::StatusCode::OK) {
+    metric_context_->SetRequestResult(server_common::ToAbslStatus(status));
+  }
   PS_VLOG(kEncrypted, log_context_) << "Encrypted GenerateBidsResponse\n"
                                     << response_->ShortDebugString();
   Finish(status);
