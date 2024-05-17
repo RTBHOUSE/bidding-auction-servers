@@ -625,9 +625,9 @@ void GenerateBidsReactor::EncryptResponseAndFinish(grpc::Status status) {
         << "Failed to encrypt the generate bids response.";
     status = grpc::Status(grpc::INTERNAL, kInternalServerError);
   }
-  if (status.error_code() != grpc::StatusCode::OK) {
-    metric_context_->SetRequestResult(server_common::ToAbslStatus(status));
-  }
+
+  metric_context_->SetRequestResult(server_common::ToAbslStatus(status));
+
   PS_VLOG(kEncrypted, log_context_) << "Encrypted GenerateBidsResponse\n"
                                     << response_->ShortDebugString();
   Finish(status);
