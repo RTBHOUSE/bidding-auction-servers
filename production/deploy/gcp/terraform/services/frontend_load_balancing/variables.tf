@@ -50,7 +50,7 @@ variable "frontend_certificate_map_id" {
   default     = ""
 }
 
-varbiable "frontend_ssl_policy_id" {
+variable "frontend_ssl_policy_id" {
   description = "A GCP ssl policy id. Example: projects/test-projects/global/sslPolicies/test-ssl-policy."
   type        = string
   default     = ""
