@@ -13,23 +13,13 @@ python_deps()
 
 python_register_toolchains("//builders/bazel")
 
-# TODO: Remove bazel_clang_tidy once we sync to the common repo commit 9edb0c3 (4/3/2024) or later
-http_archive(
-    name = "bazel_clang_tidy",
-    sha256 = "352aeb57ad7ed53ff6e02344885de426421fb6fd7a3890b04d14768d759eb598",
-    strip_prefix = "bazel_clang_tidy-4884c32e09c1ea9ac96b3f08c3004f3ac4c3fe39",
-    urls = [
-        "https://github.com/erenon/bazel_clang_tidy/archive/4884c32e09c1ea9ac96b3f08c3004f3ac4c3fe39.zip",
-    ],
-)
-
 http_archive(
     name = "google_privacysandbox_servers_common",
-    # 2024-10-09
-    sha256 = "7a0337420161304c7429c727b1f82394bc27e1e2586d2da30e6d6100ba92b437",
-    strip_prefix = "data-plane-shared-libraries-158593616a63df924af1cb689f3915b8d32e9db1",
+    # 2024-11-15
+    sha256 = "ed6b6913c16a5948cf75519d37aa35805ba7b73f0333f6968e534fa9f08db3fd",
+    strip_prefix = "data-plane-shared-libraries-96f555a9c901a31c03c426fddc128a77973535db",
     urls = [
-        "https://github.com/privacysandbox/data-plane-shared-libraries/archive/158593616a63df924af1cb689f3915b8d32e9db1.zip",
+        "https://github.com/privacysandbox/data-plane-shared-libraries/archive/96f555a9c901a31c03c426fddc128a77973535db.zip",
     ],
 )
 

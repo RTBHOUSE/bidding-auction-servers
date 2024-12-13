@@ -42,7 +42,10 @@
 #include "services/common/util/error_reporter.h"
 #include "services/common/util/request_metadata.h"
 #include "services/common/util/request_response_constants.h"
+#include "services/seller_frontend_service/data/k_anon.h"
 #include "services/seller_frontend_service/data/scoring_signals.h"
+#include "services/seller_frontend_service/private_aggregation/private_aggregation_helper.h"
+#include "services/seller_frontend_service/report_win_map.h"
 #include "services/seller_frontend_service/seller_frontend_service.h"
 #include "services/seller_frontend_service/util/encryption_util.h"
 #include "services/seller_frontend_service/util/validation_utils.h"
@@ -85,12 +88,15 @@ struct ChaffingConfig {
 // necessary state and grpc releases the reactor from memory.
 class SelectAdReactor : public grpc::ServerUnaryReactor {
  public:
+  using AdScores =
+      google::protobuf::RepeatedPtrField<ScoreAdsResponse::AdScore>;
+
   explicit SelectAdReactor(
       grpc::CallbackServerContext* context, const SelectAdRequest* request,
       SelectAdResponse* response, const ClientRegistry& clients,
       const TrustedServersConfigClient& config_client,
-      bool enable_cancellation = false, bool enable_kanon = false,
-      bool fail_fast = true,
+      const ReportWinMap& report_win_map, bool enable_cancellation = false,
+      bool enable_kanon = false, bool fail_fast = true,
       int max_buyers_solicited = metric::kMaxBuyersSolicited);
 
   // Initiate the asynchronous execution of the SelectAdRequest.
@@ -100,11 +106,15 @@ class SelectAdReactor : public grpc::ServerUnaryReactor {
   using ErrorHandlerSignature = const std::function<void(absl::string_view)>&;
   using AuctionConfig = SelectAdRequest::AuctionConfig;
 
+  // Extracts the AuctionConfig from the SelectAdRequest object.
+  grpc::Status ExtractAuctionConfig();
+
   // Gets a string representing the response to be returned to the client. This
   // data will be encrypted before it is sent back to the client.
   virtual absl::StatusOr<std::string> GetNonEncryptedResponse(
       const std::optional<ScoreAdsResponse::AdScore>& high_score,
-      const std::optional<AuctionResult::Error>& error) = 0;
+      const std::optional<AuctionResult::Error>& error,
+      const AdScores* ghost_winning_scores = nullptr) = 0;
 
   // Decodes the plaintext payload and returns a `ProtectedAudienceInput` proto.
   // Any errors while decoding are reported to error accumulator object.
@@ -128,6 +138,13 @@ class SelectAdReactor : public grpc::ServerUnaryReactor {
 
   virtual std::unique_ptr<ScoreAdsRequest::ScoreAdsRawRequest>
   CreateScoreAdsRequest();
+
+  virtual KAnonAuctionResultData GetKAnonAuctionResultData(
+      const std::optional<ScoreAdsResponse::AdScore>& high_score,
+      const AdScores* ghost_winning_scores = nullptr) = 0;
+
+  virtual AuctionResult::KAnonJoinCandidate GetKAnonJoinCandidate(
+      const ScoreAdsResponse::AdScore& score) = 0;
 
   // Checks if any client visible errors have been observed.
   bool HaveClientVisibleErrors();
@@ -267,6 +284,12 @@ class SelectAdReactor : public grpc::ServerUnaryReactor {
   // each Buyer is used as a key for the Seller Key-Value lookup.
   void CancellableFetchScoringSignals();
 
+  [[deprecated]] void CancellableFetchScoringSignalsV1(
+      const ScoringSignalsRequest& scoring_signals_request);
+
+  void CancellableFetchScoringSignalsV2(
+      const ScoringSignalsRequest& scoring_signals_request);
+
   // Handles recording the fetched scoring signals to state.
   // If the code blob is already fetched, this function initiates scoring the
   // auction.
@@ -328,12 +351,14 @@ class SelectAdReactor : public grpc::ServerUnaryReactor {
   // Initialization
   grpc::CallbackServerContext* request_context_;
   const SelectAdRequest* request_;
+  AuctionConfig auction_config_;
   std::variant<ProtectedAudienceInput, ProtectedAuctionInput>
       protected_auction_input_;
   SelectAdResponse* response_;
   AuctionResult::Error error_;
   const ClientRegistry& clients_;
   const TrustedServersConfigClient& config_client_;
+  const ReportWinMap& report_win_map_;
   // Scope for current auction (single seller, top level or component)
   const AuctionScope auction_scope_;
 
@@ -394,6 +419,9 @@ class SelectAdReactor : public grpc::ServerUnaryReactor {
   // Indicates whether or not the protected audience support is enabled.
   const bool is_protected_audience_enabled_;
 
+  // Indicates whether or not KV V2 support is enabled.
+  const bool is_tkv_v2_browser_enabled_;
+
   // Is chaffing enabled on the server.
   const bool chaffing_enabled_;
 
@@ -407,11 +435,24 @@ class SelectAdReactor : public grpc::ServerUnaryReactor {
   // Pseudo random number generator for use in chaffing.
   std::optional<std::mt19937> generator_;
 
+  bool is_sampled_for_debug_;
+
+  // JSON map of the priority signals supplied by SSP in AuctionConfig.
+  rapidjson::Document priority_signals_vector_;
+
+  // Map of {ig_owner,ig_name} to the interest group index.
+  // This is required to look up the index for handling buyer's
+  // PrivateAggregateContribution.
+  absl::flat_hash_map<InterestGroupIdentity, int> interest_group_index_map_;
+
  private:
   // Keeps track of how many buyer bids were expected initially and how many
   // were erroneous. If all bids ended up in an error state then that should be
   // flagged as an error eventually.
   AsyncTaskTracker async_task_tracker_;
+
+  // API key to use to talk to k-anon service.
+  std::string k_anon_api_key_;
 
   // Keeps track of the client contexts used for RPC calls
   ClientContexts client_contexts_;

@@ -21,6 +21,12 @@ import "google/api/annotations.proto";
 import "google/protobuf/struct.proto";
 import "src/logger/logger.proto";
 
+// Supported compression algorithms.
+enum CompressionAlgorithm {
+  COMPRESSION_ALGORITHM_UNKNOWN = 0;
+  COMPRESSION_ALGORITHM_GZIP = 1;
+}
+
 // ProtectedAudienceInput is generated and encrypted by the client,
 // passed through the untrusted Seller service, and decrypted by the
 // SellerFrontEnd service.
@@ -414,17 +420,17 @@ message AuctionResult {
   // BuyerReportingId of the winning Ad.
   // This will be verified with the buyerReportingId in the Ad properties on
   // the browser.
-  string buyer_reporting_id = 19;
+  optional string buyer_reporting_id = 19;
 
   // BuyerAndSellerReportingId of the winning Ad.
   // This will be verified with the buyerAndSellerReportingId in the Ad
   // properties on the browser.
-  string buyer_and_seller_reporting_id = 20;
+  optional string buyer_and_seller_reporting_id = 20;
 
   // SelectableBuyerAndSellerReportingId of the winning Ad.
   // This will be verified with the buyerAndSellerReportingId in the Ad
   // properties on the browser.
-  string selectable_buyer_and_seller_reporting_id = 26;
+  optional string selected_buyer_and_seller_reporting_id = 26;
 
   // Join candidates for K-Anonymity for the winner. This should include
   // key hashes corresponding to the winning ad only.
@@ -441,7 +447,7 @@ message AuctionResult {
     // NOTE: The buyer's reportWin() UDF url endpoint must match with what
     // Chrome has.
     // Refer to the spec to create key hashes-   https://wicg.github.io/turtledove/#query-ad-k-anonymity-count
-    string ad_render_url_hash = 1;
+    bytes ad_render_url_hash = 1;
 
     // Protected Audience:
     // - SHA-256 hash of an ad_component_render_url.
@@ -452,7 +458,7 @@ message AuctionResult {
     // render url.
     // Note: Currently component ads are not in scope of Protected App Signals
     // for Android.
-    repeated string ad_component_render_urls_hash = 2;
+    repeated bytes ad_component_render_urls_hash = 2;
 
     // Protected Audience:
     // - SHA-256 hash should include IG owner, ad render url, reportWin() UDF
@@ -465,7 +471,7 @@ message AuctionResult {
     // buyerAndSellerReportingId.
     // Note: Currently reporting Ids are not in scope of Protected Audience
     // for Android and Protected App Signal for Android.
-    string reporting_id_hash = 3;
+    bytes reporting_id_hash = 3;
   }
 
   KAnonJoinCandidate k_anon_winner_join_candidates = 21;
@@ -562,17 +568,17 @@ message AuctionResult {
       // BuyerReportingId of the ghost winning Ad.
       // This will be verified with the buyerAndSellerReportingId in the Ad
       // properties on the browser.
-      string buyer_reporting_id = 6;
+      optional string buyer_reporting_id = 6;
 
       // SelectableBuyerAndSellerReportingId of the ghost winning Ad.
       // This will be verified with the buyerAndSellerReportingId in the Ad
       // properties on the browser.
-      string selectable_buyer_and_seller_reporting_id = 7;
+      optional string selected_buyer_and_seller_reporting_id = 7;
 
       // BuyerAndSellerReportingId of the ghost winning Ad.
       // This will be verified with the buyerAndSellerReportingId in the Ad
       // properties on the browser.
-      string buyer_and_seller_reporting_id = 8;
+      optional string buyer_and_seller_reporting_id = 8;
     }
     optional GhostWinnerForTopLevelAuction ghost_winner_for_top_level_auction = 7;
   }
@@ -642,6 +648,45 @@ message ContextualProtectedAppSignalsData {
   bool fetch_ads_from_retrieval_service = 2;
 }
 
+// Version information for various buyer blobs that may be used during the
+// bidding process.
+// A 'version' (each string field) is an absolute path to a blob in its
+// corresponding bucket. Example: <bucket-name>/path/to/blob.
+// Note: this message is only relevant if the buyer is using FETCH_MODE_BUCKET.
+message BuyerBlobVersions {
+  // Optional.
+  // Version of buyer's GenerateBid() code for protected audience.
+  // A buyer can pass this information to the Seller in RTB response.
+  // If a version is not specified, the default version
+  // (specified in the service startup config) will be used.
+  string protected_audience_generate_bid_udf = 1;
+
+  // Optional.
+  // Version of buyer's GenerateBid() code for protected app signals.
+  // If a version is not specified, the default version
+  // (specified in the service startup config) will be used.
+  string protected_app_signals_generate_bid_udf = 2;
+
+  // Optional.
+  // Version of buyer's prepareDataForAdRetrieval() code for
+  // protected app signals.
+  // If a version is not specified, the default version
+  // (specified in the service startup config) will be used.
+  string prepare_data_for_ad_retrieval_udf = 3;
+
+  // Optional.
+  // Schema for data egress from Protected App Signals bidding.
+  // If a version is not specified, the default version
+  // (specified in the service startup config) will be used.
+  string egress_schema = 4;
+
+  // Optional.
+  // Schema for temporary unlimited data egress from Protected App Signals bidding.
+  // If a version is not specified, the default version
+  // (specified in the service startup config) will be used.
+  string temporary_unlimited_egress_schema = 5;
+}
+
 // SelectAdRequest is sent by the untrusted Seller service to SellerFrontEnd
 // (SFE) once it receives an encrypted ProtectedAuctionInput from a client.
 // SelectAdRequest would also include contextual signals and other data
@@ -689,14 +734,7 @@ message SelectAdRequest {
       // with the buyer's Key/Value services.
       optional int32 buyer_kv_experiment_group_id = 2;
 
-      // Optional.
-      // Version of buyer's GenerateBid() code.
-      // The string must be an object name belonging to the
-      // Cloud Storage bucket specified at Bidding service startup.
-      // A buyer can pass this information to the Seller in RTB response.
-      // If a version is not specified, the default version
-      // (specified in the service startup config) will be used.
-      string generate_bid_code_version = 3;
+      reserved 3;
 
       // Optional.
       // A debug id passed by the buyer that will be logged with VLOG, if
@@ -708,24 +746,9 @@ message SelectAdRequest {
       // these.
       string buyer_debug_id = 4;
 
-      // Optional.
-      // Version of buyer's GenerateBid() code for protected app signals.
-      // The string must be an object name belonging to the
-      // Cloud Storage bucket specified at Bidding service startup.
-      // A buyer can pass this information to the Seller in RTB response.
-      // If a version is not specified, the default version
-      // (specified in the service startup config) will be used.
-      string protected_signals_generate_bid_code_version = 5;
+      reserved 5;
 
-      // Optional.
-      // Version of buyer's GenerateAdRetrievalUserMetadata() code for
-      // protected app signals.
-      // The string must be an object name belonging to the
-      // Cloud Storage bucket specified at Bidding service startup.
-      // A buyer can pass this information to the Seller in RTB response.
-      // If a version is not specified, the default version
-      // (specified in the service startup config) will be used.
-      string protected_signals_generate_embeddings_version = 6;
+      reserved 6;
 
       // Specifies currency in which interest group bids will be placed (expressed
       // as ISO 4217 alpha code).
@@ -758,6 +781,11 @@ message SelectAdRequest {
       // provided in *this* field. Implying that priority_signals_overrides
       // values take precedence over the values in the priority_signals below.
       string priority_signals_overrides = 10;
+
+      // Optional.
+      // Represents all blob versions the buyer logic should use for this request.
+      // Buyer can pass this information to the Seller in RTB response.
+      BuyerBlobVersions blob_versions = 11;
     }
 
     // The key in the map corresponds to Interest Group Owner (IGOwner), a
@@ -782,6 +810,9 @@ message SelectAdRequest {
       // Cloud Storage bucket specified at Auction service startup.
       // If a version is not specified, the default version
       // (specified in the service startup config) will be used.
+      // The absolute path of the blob must be used. Example:
+      // <bucket-name>/path/to/scoreAd.js
+      // Note: this field is only relevant if the seller is using FETCH_MODE_BUCKET.
       string score_ad_version = 2;
     }
 
@@ -843,6 +874,7 @@ message SelectAdRequest {
     // 'PerBuyerConfig.priority_signals_overrides'.
     string priority_signals = 13;
   }
+
   message ComponentAuctionResult {
     //  AuctionResult from a server component auction.
     bytes auction_result_ciphertext = 1;
@@ -857,7 +889,7 @@ message SelectAdRequest {
   bytes protected_audience_ciphertext = 1 [deprecated = true];
 
   // Plaintext. Passed by the untrusted Seller service.
-  AuctionConfig auction_config = 2;
+  AuctionConfig auction_config = 2 [deprecated = true];
 
   // Type of end user's device / client, that would help in validating the
   // client integrity. Also passed to the key/value services.
@@ -870,6 +902,19 @@ message SelectAdRequest {
   // Encrypted Component Auction Results for conducting a top level auction.
   // This should be populated along with protected_auction_ciphertext.
   repeated ComponentAuctionResult component_auction_results = 5;
+
+  message CompressedAuctionConfig {
+    // Compression algorithm used to compress the AuctionConfig.
+    CompressionAlgorithm compression_algorithm = 1;
+
+    // Compressed AuctionConfig proto bytestring.
+    bytes auction_config = 2;
+  }
+
+  // The `compressed_auction_config` field provides a compressed version of the
+  // AuctionConfig proto that adtechs can provide in place of the 'auction_config'
+  // field to reduce network costs.
+  CompressedAuctionConfig compressed_auction_config = 6;
 }
 
 // SelectAdResponse is sent from the SellerFrontEndService to the Seller
@@ -1012,6 +1057,11 @@ message GetBidsRequest {
     // Represents a serialized JSON map containing priority signal entries used to
     // construct the priority signals vector.
     string priority_signals = 18;
+
+    // Optional.
+    // Represents all blob versions the buyer logic should use for this request.
+    // Buyer can pass this information to the Seller in RTB response.
+    BuyerBlobVersions blob_versions = 19;
   }
 
   // Encrypted GetBidsRawRequest.
@@ -1103,20 +1153,21 @@ message AdWithBid {
   string bid_currency = 10;
 
   // Optional. buyerReportingId set in buyerReportingMetadata of reportWin()
-  string buyer_reporting_id = 11;
+  optional string buyer_reporting_id = 11;
 
   // Private aggregation object.
   repeated PrivateAggregateContribution private_aggregation_contributions = 12;
 
-  // If provided, and selectableBuyerAndSellerReportingId is not set then
+  // If provided, and selectedBuyerAndSellerReportingId is not set then
   // this will be substituted for interestGroupName.
-  string buyer_and_seller_reporting_id = 13;
+  optional string buyer_and_seller_reporting_id = 13;
 
-  // Optional. selectableBuyerAndSellerReportingId in buyerReportingMetadata of
+  // Optional. selectedBuyerAndSellerReportingId in buyerReportingMetadata of
   // reportWin(). If provided, this will be substituted for interestGroupName.
-  string selectable_buyer_and_seller_reporting_id = 14;
+  optional string selected_buyer_and_seller_reporting_id = 14;
 
-  // Optional. Value of the data version header from the buyer kv server. This is passed through to the buyer reporting function.
+  // Optional. Value of the data version header from the buyer kv server.
+  // This is passed through to the buyer reporting function.
   int32 data_version = 15;
 }
 // (-- LINT.ThenChange(bid_generate_bid) --)
@@ -1272,6 +1323,11 @@ message GenerateBidsRequest {
 
     // If BFE is sampling this request for debug.
     bool is_sampled_for_debug = 14;
+
+    // Optional.
+    // Represents all blob versions the buyer logic should use for this request.
+    // Buyer can pass this information to the Seller in RTB response.
+    BuyerBlobVersions blob_versions = 15;
   }
 
   // Encrypted GenerateBidsRawRequest.
@@ -1376,6 +1432,11 @@ message GenerateProtectedAppSignalsBidsRequest {
 
     // If BFE is sampling this request for debug.
     bool is_sampled_for_debug = 13;
+
+    // Optional.
+    // Represents all blob versions the buyer logic should use for this request.
+    // Buyer can pass this information to the Seller in RTB response.
+    BuyerBlobVersions blob_versions = 14;
   }
 
   // Encrypted GenerateProtectedAppSignalsBidsRawRequest.
@@ -1515,17 +1576,17 @@ message ScoreAdsRequest {
       string interest_group_origin = 13;
 
       // Optional. buyerReportingId set in buyerReportingMetadata of reportWin()
-      string buyer_reporting_id = 14;
+      optional string buyer_reporting_id = 14;
 
       // Optional. buyerAndSellerReportingId in buyerReportingMetadata
-      // of reportWin(). If provided, and selectableBuyerAndSellerReportingId
+      // of reportWin(). If provided, and selectedBuyerAndSellerReportingId
       // is not set then this will be substituted for interestGroupName.
-      string buyer_and_seller_reporting_id = 15;
+      optional string buyer_and_seller_reporting_id = 15;
 
-      // Optional. selectableBuyerAndSellerReportingId in buyerReportingMetadata
+      // Optional. selectedBuyerAndSellerReportingId in buyerReportingMetadata
       // of reportWin(). If provided, this will be substituted for
       // interestGroupName.
-      string selectable_buyer_and_seller_reporting_id = 16;
+      optional string selected_buyer_and_seller_reporting_id = 16;
 
       // Indicates whether or not the ad meets the k-anonymity threshold.
       bool k_anon_status = 17;
@@ -1535,6 +1596,10 @@ message ScoreAdsRequest {
       // Optional. Value of the data version header from the buyer kv server.
       // This is passed through to the buyer reporting function.
       uint32 data_version = 19;
+
+      // Interest group index corresponding to this Ad.
+      // This is required to populate the PrivateAggregateContribution.
+      int32 interest_group_idx = 20;
     }
 
     // Ad with bid.
@@ -1665,6 +1730,16 @@ message ScoreAdsRequest {
     // Clients can indicate whether K-Anonymity is enforced for the traffic.
     // By default, this would be false, i.e. K-Anonymity is not enforced.
     bool enforce_kanon = 16;
+
+    // Optional. Value of the data version header from the seller kv server.
+    // This is passed through to the seller reporting function.
+    uint32 seller_data_version = 17;
+
+    // If SFE is sampling this request for debug.
+    bool is_sampled_for_debug = 18;
+
+    // Optional. From AuctionConfig.code_experiment_spec.score_ad_version.
+    string score_ad_version = 19;
   }
 
   // Encrypted ScoreAdsRawRequest.
@@ -1810,11 +1885,11 @@ message ScoreAdsResponse {
     // BuyerReportingId of the winning Ad.
     // This will be verified with the buyerReportingId in the Ad properties on
     // the browser.
-    string buyer_reporting_id = 18;
+    optional string buyer_reporting_id = 18;
     // BuyerAnd SellerReportingId of the winning Ad.
     // This will be verified with the buyerAndSellerReportingId in the Ad
     // properties on the browser.
-    string buyer_and_seller_reporting_id = 19;
+    optional string buyer_and_seller_reporting_id = 19;
 
     // Owner of the IG to which the winning ad belongs (applicable for
     // Protected Audience only).
@@ -1872,7 +1947,9 @@ message WinReportingUrls {
   ReportingUrls top_level_seller_reporting_urls = 3;
 }
 
-// message to store the server request/ response
+// message to store the server request/ response.
+// udf logs are always populated; raw request, KvSignal and encrypted request
+// are populated according to server verbosity setting.
 message EventMessage {
   message KvSignal {
     string request = 1;
@@ -1890,6 +1967,7 @@ message EventMessage {
     ProtectedAudienceInput protected_audience = 4;
   }
   AuctionResult auction_result = 5;
+  repeated AuctionResult component_auction_result = 6;
 
   // bfe
   GetBidsRequest get_bid_request = 11;
@@ -1911,4 +1989,10 @@ message EventMessage {
   ScoreAdsResponse.ScoreAdsRawResponse score_ad_raw_response = 33;
 
   KvSignal kv_signal = 41;
+
+  message MetaData {
+    bool is_consented = 1;
+    bool is_prod_debug = 2;
+  }
+  MetaData meta_data = 51;
 }

@@ -20,9 +20,8 @@
 #include "services/auction_service/code_wrapper/seller_udf_wrapper.h"
 #include "services/auction_service/reporting/reporting_helper.h"
 #include "services/auction_service/reporting/reporting_response.h"
-#include "services/auction_service/udf_fetcher/adtech_code_version_util.h"
+#include "services/common/constants/common_constants.h"
 #include "services/common/util/json_util.h"
-#include "services/common/util/request_response_constants.h"
 
 namespace privacy_sandbox::bidding_auction_servers {
 namespace {
@@ -69,7 +68,8 @@ inline DispatchRequest GetReportResultDispatchRequest(
     const std::string& seller_device_signals_json) {
   // Construct the wrapper struct for our V8 Dispatch Request.
   return {.id = request_data.post_auction_signals.winning_ad_render_url,
-          .version_string = GetDefaultSellerUdfVersion(),
+          .version_string =
+              dispatch_request_config.report_result_udf_version.data(),
           .handler_name = kReportResultEntryFunction,
           .input = GetReportResultInput(seller_device_signals_json,
                                         dispatch_request_config, request_data)};
@@ -122,6 +122,12 @@ rapidjson::Document GenerateSellerDeviceSignals(
                        winning_bid_currency_value.Move(),
                        document.GetAllocator());
   }
+  if (dispatch_request_data.post_auction_signals.seller_data_version > 0) {
+    document.AddMember(
+        kSellerDataVersionTag,
+        dispatch_request_data.post_auction_signals.seller_data_version,
+        document.GetAllocator());
+  }
   if (!dispatch_request_data.post_auction_signals
            .highest_scoring_other_bid_currency.empty()) {
     rapidjson::Value highest_scoring_other_bid_currency_value(
@@ -158,7 +164,7 @@ absl::Status PerformReportResult(
                       SerializeJsonDoc(seller_device_signals));
   DispatchRequest dispatch_request = GetReportResultDispatchRequest(
       dispatch_request_config, request_data, seller_device_signals_json);
-  dispatch_request.tags[kRomaTimeoutMs] =
+  dispatch_request.tags[kRomaTimeoutTag] =
       dispatch_request_config.roma_timeout_ms;
   std::vector<DispatchRequest> dispatch_requests = {
       std::move(dispatch_request)};

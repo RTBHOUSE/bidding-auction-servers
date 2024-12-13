@@ -23,6 +23,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/base/nullability.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
@@ -38,6 +39,7 @@
 #include "services/auction_service/reporting/seller/seller_reporting_manager.h"
 #include "services/auction_service/reporting/seller/top_level_seller_reporting_manager.h"
 #include "services/auction_service/utils/proto_utils.h"
+#include "services/common/constants/common_constants.h"
 #include "services/common/util/auction_scope_util.h"
 #include "services/common/util/cancellation_wrapper.h"
 #include "services/common/util/json_util.h"
@@ -58,12 +60,12 @@ using HighestScoringOtherBidsMap =
     ::google::protobuf::Map<std::string, google::protobuf::ListValue>;
 using server_common::log::PS_VLOG_IS_ON;
 
-constexpr int kBytesMultiplyer = 1024;
+constexpr long kBytesMultiplyer = 1024;
 
 inline void MayVlogRomaResponses(
     const std::vector<absl::StatusOr<DispatchResponse>>& responses,
     RequestLogContext& log_context) {
-  if (PS_VLOG_IS_ON(2)) {
+  if (PS_VLOG_IS_ON(kDispatch)) {
     for (const auto& dispatch_response : responses) {
       PS_VLOG(kDispatch, log_context)
           << "ScoreAds V8 Response: " << dispatch_response.status();
@@ -377,10 +379,13 @@ ScoreAdsReactor::ScoreAdsReactor(
       enable_seller_debug_url_generation_(
           runtime_config.enable_seller_debug_url_generation),
       roma_timeout_ms_(runtime_config.roma_timeout_ms),
-      log_context_(GetLoggingContext(raw_request_),
-                   raw_request_.consented_debug_config(),
-                   [this]() { return raw_response_.mutable_debug_info(); }),
-      enable_adtech_code_logging_(log_context_.is_consented()),
+      log_context_(
+          GetLoggingContext(raw_request_),
+          raw_request_.consented_debug_config(),
+          [this]() { return raw_response_.mutable_debug_info(); },
+          this->raw_request_.is_sampled_for_debug()),
+      enable_adtech_code_logging_(log_context_.is_consented() ||
+                                  this->raw_request_.is_sampled_for_debug()),
       enable_report_result_url_generation_(
           runtime_config.enable_report_result_url_generation),
       enable_protected_app_signals_(
@@ -392,23 +397,37 @@ ScoreAdsReactor::ScoreAdsReactor(
       max_allowed_size_all_debug_urls_chars_(
           kBytesMultiplyer * runtime_config.max_allowed_size_all_debug_urls_kb),
       auction_scope_(GetAuctionScope(raw_request_)),
-      code_version_(runtime_config.default_code_version),
       enable_report_win_url_generation_(
           runtime_config.enable_report_win_url_generation &&
           auction_scope_ !=
               AuctionScope::AUCTION_SCOPE_SERVER_TOP_LEVEL_SELLER),
       enable_seller_and_buyer_code_isolation_(
           runtime_config.enable_seller_and_buyer_udf_isolation),
+      require_scoring_signals_for_scoring_(
+          runtime_config.require_scoring_signals_for_scoring),
       enable_enforce_kanon_(runtime_config.enable_kanon &&
-                            raw_request_.enforce_kanon()) {
+                            raw_request_.enforce_kanon()),
+      buyers_with_report_win_enabled_(
+          runtime_config.buyers_with_report_win_enabled),
+      protected_app_signals_buyers_with_report_win_enabled_(
+          runtime_config.protected_app_signals_buyers_with_report_win_enabled) {
   CHECK_OK([this]() {
     PS_ASSIGN_OR_RETURN(metric_context_,
                         metric::AuctionContextMap()->Remove(request_));
     if (log_context_.is_consented()) {
       metric_context_->SetConsented(raw_request_.log_context().generation_id());
+    } else if (log_context_.is_prod_debug()) {
+      metric_context_->SetConsented(kProdDebug.data());
     }
     return absl::OkStatus();
   }()) << "AuctionContextMap()->Get(request) should have been called";
+
+  if (runtime_config.use_per_request_udf_versioning &&
+      !raw_request_.score_ad_version().empty()) {
+    code_version_ = raw_request_.score_ad_version();
+  } else {
+    code_version_ = runtime_config.default_score_ad_version;
+  }
 }
 
 absl::btree_map<std::string, std::string> ScoreAdsReactor::GetLoggingContext(
@@ -449,7 +468,7 @@ absl::Status ScoreAdsReactor::PopulateTopLevelAuctionDispatchRequests(
             auction_result.ad_render_url(),
             auction_result.ad_component_render_urls(),
             auction_result.auction_params().component_seller(),
-            auction_result.bid_currency()),
+            auction_result.bid_currency(), raw_request_.seller_data_version()),
         log_context_, enable_adtech_code_logging_, enable_debug_reporting,
         code_version_);
     if (!dispatch_request.ok()) {
@@ -493,7 +512,7 @@ absl::Status ScoreAdsReactor::PopulateTopLevelAuctionDispatchRequests(
       continue;
     }
 
-    dispatch_request->tags[kRomaTimeoutMs] = roma_timeout_ms_;
+    dispatch_request->tags[kRomaTimeoutTag] = roma_timeout_ms_;
     dispatch_requests_.push_back(*std::move(dispatch_request));
   }
   return absl::OkStatus();
@@ -501,69 +520,116 @@ absl::Status ScoreAdsReactor::PopulateTopLevelAuctionDispatchRequests(
 
 void ScoreAdsReactor::PopulateProtectedAudienceDispatchRequests(
     bool enable_debug_reporting,
-    const absl::flat_hash_map<std::string, rapidjson::StringBuffer>&
+    absl::Nullable<
+        const absl::flat_hash_map<std::string, rapidjson::StringBuffer>*>
         scoring_signals,
     const std::shared_ptr<std::string>& auction_config,
     google::protobuf::RepeatedPtrField<AdWithBidMetadata>& ads) {
+  if (require_scoring_signals_for_scoring_ && scoring_signals == nullptr) {
+    PS_VLOG(kNoisyWarn, log_context_)
+        << "Skipping ALL protected audience ads since scoring signals are "
+           "required but null.";
+    return;
+  }
   while (!ads.empty()) {
     std::unique_ptr<AdWithBidMetadata> ad(ads.ReleaseLast());
-    if (scoring_signals.contains(ad->render())) {
-      auto dispatch_request = BuildScoreAdRequest(
-          *ad, auction_config, scoring_signals, enable_debug_reporting,
-          log_context_, enable_adtech_code_logging_,
-          MakeBidMetadata(raw_request_.publisher_hostname(),
-                          ad->interest_group_owner(), ad->render(),
-                          ad->ad_components(), raw_request_.top_level_seller(),
-                          ad->bid_currency()),
-          code_version_);
-      if (!dispatch_request.ok()) {
+    absl::string_view scoring_signals_str = kEmptyScoringSignalsJson;
+    if (scoring_signals != nullptr) {
+      auto scoring_signals_it = scoring_signals->find(ad->render());
+      if (require_scoring_signals_for_scoring_ &&
+          scoring_signals_it == scoring_signals->end()) {
         PS_VLOG(kNoisyWarn, log_context_)
-            << "Failed to create scoring request for protected audience: "
-            << dispatch_request.status();
+            << "Skipping protected audience ad since render "
+               "URL is not found in the scoring signals: "
+            << ad->render();
         continue;
       }
-      auto [unused_it, inserted] =
-          ad_data_.emplace(dispatch_request->id, std::move(ad));
-      if (!inserted) {
-        PS_VLOG(kNoisyWarn, log_context_)
-            << "Protected Audience ScoreAd Request id "
-               "conflict detected: "
-            << dispatch_request->id;
-        continue;
+      if (scoring_signals_it != scoring_signals->end()) {
+        // Iterators hold references to the underlying elements in their
+        // collection, they do not make copies - and .GetString() is a rapidjson
+        // method returning a c-style char *, so it should not be making a copy
+        // either. Therefore taking a reference to this (which is what a
+        // string_view is) is safe.
+        scoring_signals_str = scoring_signals_it->second.GetString();
       }
-
-      dispatch_request->tags[kRomaTimeoutMs] = roma_timeout_ms_;
-      dispatch_requests_.push_back(*std::move(dispatch_request));
     }
+    auto dispatch_request = BuildScoreAdRequest(
+        *ad, auction_config, scoring_signals_str, enable_debug_reporting,
+        log_context_, enable_adtech_code_logging_,
+        MakeBidMetadata(raw_request_.publisher_hostname(),
+                        ad->interest_group_owner(), ad->render(),
+                        ad->ad_components(), raw_request_.top_level_seller(),
+                        ad->bid_currency(), raw_request_.seller_data_version()),
+        code_version_);
+    if (!dispatch_request.ok()) {
+      PS_VLOG(kNoisyWarn, log_context_)
+          << "Failed to create scoring request for protected audience: "
+          << dispatch_request.status();
+      continue;
+    }
+    auto [unused_it, inserted] =
+        ad_data_.emplace(dispatch_request->id, std::move(ad));
+    if (!inserted) {
+      PS_VLOG(kNoisyWarn, log_context_)
+          << "Protected Audience ScoreAd Request id "
+             "conflict detected: "
+          << dispatch_request->id;
+      continue;
+    }
+
+    dispatch_request->tags[kRomaTimeoutTag] = roma_timeout_ms_;
+    dispatch_requests_.push_back(*std::move(dispatch_request));
   }
 }
 
 void ScoreAdsReactor::MayPopulateProtectedAppSignalsDispatchRequests(
     bool enable_debug_reporting,
-    const absl::flat_hash_map<std::string, rapidjson::StringBuffer>&
+    absl::Nullable<
+        const absl::flat_hash_map<std::string, rapidjson::StringBuffer>*>
         scoring_signals,
     const std::shared_ptr<std::string>& auction_config,
     RepeatedPtrField<ProtectedAppSignalsAdWithBidMetadata>&
         protected_app_signals_ad_bids) {
   PS_VLOG(8, log_context_) << __func__;
+  if (require_scoring_signals_for_scoring_ && scoring_signals == nullptr) {
+    PS_VLOG(kNoisyWarn, log_context_)
+        << "Skipping ALL protected app signals ads since scoring signals are "
+           "required but null.";
+    return;
+  }
   while (!protected_app_signals_ad_bids.empty()) {
     std::unique_ptr<ProtectedAppSignalsAdWithBidMetadata> pas_ad_with_bid(
         protected_app_signals_ad_bids.ReleaseLast());
-    if (!scoring_signals.contains(pas_ad_with_bid->render())) {
-      PS_VLOG(5, log_context_)
-          << "Skipping protected app signals ad since render "
-             "URL is not found in the scoring signals: "
-          << pas_ad_with_bid->render();
-      continue;
+    absl::string_view scoring_signals_str = kEmptyScoringSignalsJson;
+    if (scoring_signals != nullptr) {
+      auto scoring_signals_it =
+          scoring_signals->find(pas_ad_with_bid->render());
+      if (require_scoring_signals_for_scoring_ &&
+          scoring_signals_it == scoring_signals->end()) {
+        PS_VLOG(kNoisyWarn, log_context_)
+            << "Skipping protected app signals ad since render "
+               "URL is not found in the scoring signals: "
+            << pas_ad_with_bid->render();
+        continue;
+      }
+      if (scoring_signals_it != scoring_signals->end()) {
+        // Iterators hold references to the underlying elements in their
+        // collection, they do not make copies - and .GetString() is a rapidjson
+        // method returning a c-style char *, so it should not be making a copy
+        // either. Therefore taking a reference to this (which is what a
+        // string_view is) is safe.
+        scoring_signals_str = scoring_signals_it->second.GetString();
+      }
     }
 
     auto dispatch_request = BuildScoreAdRequest(
-        *pas_ad_with_bid, auction_config, scoring_signals,
+        *pas_ad_with_bid, auction_config, scoring_signals_str,
         enable_debug_reporting, log_context_, enable_adtech_code_logging_,
         MakeBidMetadata(
             raw_request_.publisher_hostname(), pas_ad_with_bid->owner(),
             pas_ad_with_bid->render(), GetEmptyAdComponentRenderUrls(),
-            raw_request_.top_level_seller(), pas_ad_with_bid->bid_currency()),
+            raw_request_.top_level_seller(), pas_ad_with_bid->bid_currency(),
+            raw_request_.seller_data_version()),
         code_version_);
     if (!dispatch_request.ok()) {
       PS_VLOG(kNoisyWarn, log_context_)
@@ -581,7 +647,7 @@ void ScoreAdsReactor::MayPopulateProtectedAppSignalsDispatchRequests(
       continue;
     }
 
-    dispatch_request->tags[kRomaTimeoutMs] = roma_timeout_ms_;
+    dispatch_request->tags[kRomaTimeoutTag] = roma_timeout_ms_;
     dispatch_requests_.push_back(*std::move(dispatch_request));
   }
 }
@@ -593,12 +659,16 @@ void ScoreAdsReactor::Execute() {
     return;
   }
 
-  PS_VLOG(kEncrypted, log_context_)
-      << "Encrypted ScoreAdsRequest exported in EventMessage";
-  log_context_.SetEventMessageField(*request_);
-  PS_VLOG(kPlain, log_context_)
-      << "ScoreAdsRawRequest exported in EventMessage";
-  log_context_.SetEventMessageField(raw_request_);
+  if (server_common::log::PS_VLOG_IS_ON(kPlain)) {
+    if (server_common::log::PS_VLOG_IS_ON(kEncrypted)) {
+      PS_VLOG(kEncrypted, log_context_)
+          << "Encrypted ScoreAdsRequest exported in EventMessage if consented";
+      log_context_.SetEventMessageField(*request_);
+    }
+    PS_VLOG(kPlain, log_context_)
+        << "ScoreAdsRawRequest exported in EventMessage if consented";
+    log_context_.SetEventMessageField(raw_request_);
+  }
   if (!raw_request_.protected_app_signals_ad_bids().empty() &&
       !enable_protected_app_signals_) {
     PS_VLOG(kNoisyWarn, log_context_) << "Found PAS bids even when feature is "
@@ -644,19 +714,22 @@ void ScoreAdsReactor::Execute() {
     auto protected_app_signals_ad_bids =
         raw_request_.protected_app_signals_ad_bids();
     absl::StatusOr<absl::flat_hash_map<std::string, rapidjson::StringBuffer>>
-        scoring_signals =
-            BuildTrustedScoringSignals(raw_request_, log_context_);
+        scoring_signals = BuildTrustedScoringSignals(
+            raw_request_, log_context_, require_scoring_signals_for_scoring_);
 
-    if (!scoring_signals.ok()) {
+    if (require_scoring_signals_for_scoring_ && !scoring_signals.ok()) {
       PS_LOG(ERROR, log_context_) << "No scoring signals found, finishing RPC: "
                                   << scoring_signals.status();
       FinishWithStatus(server_common::FromAbslStatus(scoring_signals.status()));
       return;
     }
     PopulateProtectedAudienceDispatchRequests(
-        enable_debug_reporting, *scoring_signals, auction_config, ads);
+        enable_debug_reporting,
+        (scoring_signals.ok()) ? &(*scoring_signals) : nullptr, auction_config,
+        ads);
     MayPopulateProtectedAppSignalsDispatchRequests(
-        enable_debug_reporting, *scoring_signals, auction_config,
+        enable_debug_reporting,
+        (scoring_signals.ok()) ? &(*scoring_signals) : nullptr, auction_config,
         protected_app_signals_ad_bids);
   }
 
@@ -701,9 +774,14 @@ void ScoreAdsReactor::Execute() {
 
 void ScoreAdsReactor::InitializeBuyerReportingDispatchRequestData(
     const ScoreAdsResponse::AdScore& winning_ad_score) {
-  buyer_reporting_dispatch_request_data_.buyer_signals =
-      raw_request_.per_buyer_signals().at(
-          winning_ad_score.interest_group_owner());
+  auto ad_it = raw_request_.per_buyer_signals().find(
+      winning_ad_score.interest_group_owner());
+  if (ad_it != raw_request_.per_buyer_signals().end()) {
+    buyer_reporting_dispatch_request_data_.buyer_signals = ad_it->second;
+  } else {
+    PS_LOG(ERROR, log_context_) << "Found empty per_buyer_signals for winner:"
+                                << winning_ad_score.interest_group_owner();
+  }
   buyer_reporting_dispatch_request_data_.seller = raw_request_.seller();
   buyer_reporting_dispatch_request_data_.interest_group_name =
       winning_ad_score.interest_group_name();
@@ -741,7 +819,8 @@ void ScoreAdsReactor::PerformReportingWithSellerAndBuyerCodeIsolation(
       .enable_report_win_url_generation = enable_report_win_url_generation_,
       .enable_protected_app_signals = enable_protected_app_signals_,
       .enable_report_win_input_noising = enable_report_win_input_noising_,
-      .enable_adtech_code_logging = enable_adtech_code_logging_};
+      .enable_adtech_code_logging = enable_adtech_code_logging_,
+      .report_result_udf_version = code_version_};
   buyer_reporting_dispatch_request_data_.auction_config =
       BuildAuctionConfig(raw_request_);
 
@@ -753,7 +832,8 @@ void ScoreAdsReactor::PerformReportingWithSellerAndBuyerCodeIsolation(
       return;
     }
     post_auction_signals_ = GeneratePostAuctionSignals(
-        winning_ad_score, raw_request_.seller_currency());
+        winning_ad_score, raw_request_.seller_currency(),
+        raw_request_.seller_data_version());
     InitializeBuyerReportingDispatchRequestData(winning_ad_score);
 
     const auto& ad = ad_it->second;
@@ -780,7 +860,8 @@ void ScoreAdsReactor::PerformReportingWithSellerAndBuyerCodeIsolation(
              protected_app_signals_ad_it !=
              protected_app_signals_ad_data_.end()) {
     post_auction_signals_ = GeneratePostAuctionSignals(
-        winning_ad_score, raw_request_.seller_currency());
+        winning_ad_score, raw_request_.seller_currency(),
+        raw_request_.seller_data_version());
     InitializeBuyerReportingDispatchRequestData(winning_ad_score);
 
     const auto& protected_app_signals_ad = protected_app_signals_ad_it->second;
@@ -1375,7 +1456,7 @@ void ScoreAdsReactor::ScoreAdsCallback(
 
 void ScoreAdsReactor::ReportingCallback(
     const std::vector<absl::StatusOr<DispatchResponse>>& responses) {
-  if (PS_VLOG_IS_ON(2)) {
+  if (PS_VLOG_IS_ON(kDispatch)) {
     for (const auto& dispatch_response : responses) {
       PS_VLOG(kDispatch, log_context_)
           << "Reporting V8 Response: " << dispatch_response.status();
@@ -1590,6 +1671,13 @@ void ScoreAdsReactor::CancellableReportResultCallback(
     }
     absl::Status report_win_status;
     if (!buyer_reporting_dispatch_request_data_.egress_payload) {
+      // No reportWin call should be dispatched if no UDF endpoint was
+      // configured.
+      if (!buyers_with_report_win_enabled_.contains(
+              buyer_reporting_dispatch_request_data_.buyer_origin)) {
+        EncryptAndFinishOK();
+        return;
+      }
       report_win_status = PerformPAReportWin(
           reporting_dispatch_request_config_,
           buyer_reporting_dispatch_request_data_, seller_device_signals_,
@@ -1598,6 +1686,13 @@ void ScoreAdsReactor::CancellableReportResultCallback(
           },
           dispatcher_);
     } else {
+      // No reportWin call should be dispatched if no UDF endpoint was
+      // configured.
+      if (!protected_app_signals_buyers_with_report_win_enabled_.contains(
+              buyer_reporting_dispatch_request_data_.buyer_origin)) {
+        EncryptAndFinishOK();
+        return;
+      }
       report_win_status = PerformPASReportWin(
           reporting_dispatch_request_config_,
           buyer_reporting_dispatch_request_data_, seller_device_signals_,
@@ -1623,7 +1718,8 @@ void ScoreAdsReactor::PerformDebugReporting(
     return;
   }
   PostAuctionSignals post_auction_signals = GeneratePostAuctionSignals(
-      winning_ad_score, raw_request_.seller_currency());
+      winning_ad_score, raw_request_.seller_currency(),
+      raw_request_.seller_data_version());
   for (const auto& [id, ad_score] : ad_scores_) {
     if (ad_score->has_debug_report_urls()) {
       absl::string_view debug_url;
@@ -1670,9 +1766,11 @@ void ScoreAdsReactor::PerformDebugReporting(
 }
 
 void ScoreAdsReactor::EncryptAndFinishOK() {
-  PS_VLOG(kPlain, log_context_)
-      << "ScoreAdsRawResponse exported in EventMessage";
-  log_context_.SetEventMessageField(raw_response_);
+  if (server_common::log::PS_VLOG_IS_ON(kPlain)) {
+    PS_VLOG(kPlain, log_context_)
+        << "ScoreAdsRawResponse exported in EventMessage if consented";
+    log_context_.SetEventMessageField(raw_response_);
+  }
   // ExportEventMessage before encrypt response
   log_context_.ExportEventMessage(/*if_export_consented=*/true);
   EncryptResponse();
@@ -1700,7 +1798,8 @@ void ScoreAdsReactor::DispatchReportingRequestForPA(
         GeneratePostAuctionSignalsForTopLevelSeller(winning_ad_score);
   } else {
     post_auction_signals = GeneratePostAuctionSignals(
-        winning_ad_score, raw_request_.seller_currency());
+        winning_ad_score, raw_request_.seller_currency(),
+        raw_request_.seller_data_version());
   }
   ReportingDispatchRequestData dispatch_request_data = {
       .handler_name = kReportingDispatchHandlerFunctionName,
@@ -1866,7 +1965,8 @@ void ScoreAdsReactor::DispatchReportingRequestForPAS(
       {.handler_name = kReportingProtectedAppSignalsFunctionName,
        .auction_config = auction_config,
        .post_auction_signals = GeneratePostAuctionSignals(
-           winning_ad_score, raw_request_.seller_currency()),
+           winning_ad_score, raw_request_.seller_currency(),
+           raw_request_.seller_data_version()),
        .publisher_hostname = raw_request_.publisher_hostname(),
        .log_context = log_context_,
        .buyer_reporting_metadata = buyer_reporting_metadata,
@@ -1889,7 +1989,7 @@ void ScoreAdsReactor::DispatchReportingRequest(
       .enable_adtech_code_logging = enable_adtech_code_logging_};
   DispatchRequest dispatch_request = GetReportingDispatchRequest(
       dispatch_request_config, dispatch_request_data);
-  dispatch_request.tags[kRomaTimeoutMs] = roma_timeout_ms_;
+  dispatch_request.tags[kRomaTimeoutTag] = roma_timeout_ms_;
 
   std::vector<DispatchRequest> dispatch_requests = {dispatch_request};
   auto status = dispatcher_.BatchExecute(

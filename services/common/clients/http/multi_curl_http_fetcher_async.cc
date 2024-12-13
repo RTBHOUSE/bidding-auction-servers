@@ -21,10 +21,12 @@
 
 #include <curl/curl.h>
 
+#include "absl/flags/flag.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "absl/time/time.h"
 #include "event2/thread.h"
+#include "services/common/constants/common_service_flags.h"
 #include "services/common/loggers/request_log_context.h"
 
 namespace privacy_sandbox::bidding_auction_servers {
@@ -104,40 +106,6 @@ void GetTraceFromCurl(CURL* handle) {
 
 }  // namespace
 
-EventBase::EventBase(int num_priorities) {
-  evthread_use_pthreads();
-  event_base_ = event_base_new();
-  event_base_priority_init(event_base_, num_priorities);
-  if (server_common::log::PS_VLOG_IS_ON(10)) {
-    event_enable_debug_mode();
-  }
-}
-
-EventBase::~EventBase() {
-  if (event_base_ != nullptr) {
-    event_base_free(event_base_);
-  }
-}
-
-struct event_base* EventBase::get() { return event_base_; }
-
-Event::Event(struct event_base* base, evutil_socket_t fd, short event_type,
-             EventCallback event_callback, void* arg, int priority,
-             struct timeval* event_timeout)
-    : priority_(priority),
-      event_(event_new(base, fd, event_type, event_callback, arg)) {
-  event_priority_set(event_, priority_);
-  event_add(event_, event_timeout);
-}
-
-struct event* Event::get() { return event_; }
-Event::~Event() {
-  if (event_) {
-    event_del(event_);
-    event_free(event_);
-  }
-}
-
 static struct timeval OneSecond = {1, 0};
 
 MultiCurlHttpFetcherAsync::MultiCurlHttpFetcherAsync(
@@ -146,6 +114,9 @@ MultiCurlHttpFetcherAsync::MultiCurlHttpFetcherAsync(
     : executor_(executor),
       keepalive_idle_sec_(keepalive_idle_sec),
       keepalive_interval_sec_(keepalive_interval_sec),
+      skip_tls_verification_(
+          absl::GetFlag(FLAGS_https_fetch_skips_tls_verification)
+              .value_or(false)),
       // Shutdown timer event is persistent because we don't want to remove
       // it from the event loop the first time it fires. With this timer, we
       // periodically check for fetcher shutdown and terminate the event loop
@@ -330,6 +301,12 @@ MultiCurlHttpFetcherAsync::CreateCurlRequest(
   // encodings. See https://curl.se/libcurl/c/CURLOPT_ACCEPT_ENCODING.html.
   curl_easy_setopt(req_handle, CURLOPT_ACCEPT_ENCODING, "");
 
+  if (skip_tls_verification_) {
+    curl_easy_setopt(req_handle, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(req_handle, CURLOPT_SSL_VERIFYHOST, 0L);
+    curl_easy_setopt(req_handle, CURLOPT_PROXY_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(req_handle, CURLOPT_PROXY_SSL_VERIFYHOST, 0L);
+  }
   // Set HTTP headers.
   if (!request.headers.empty()) {
     curl_easy_setopt(req_handle, CURLOPT_HTTPHEADER,

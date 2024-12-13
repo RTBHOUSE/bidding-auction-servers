@@ -33,12 +33,17 @@ struct GetBidsConfig {
   bool is_protected_audience_enabled;
   // Whether chaffing is enabled.
   bool is_chaffing_enabled;
-  // Enable v2 for tkv
-  bool is_tkv_v2_enabled;
+  // Enable v2 for browser
+  bool is_tkv_v2_browser_enabled;
   bool enable_cancellation = false;
   bool enable_kanon = false;
   // Sample rate for debug request.
-  int debug_sample_rate_micro;
+  int debug_sample_rate_micro = 0;
+  // make all request consented in non_prod
+  bool consent_all_requests = false;
+  bool priority_vector_enabled = false;
+  bool test_mode = false;
+  bool tkv_v2_address_empty = false;
 };
 
 }  // namespace privacy_sandbox::bidding_auction_servers

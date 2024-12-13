@@ -104,6 +104,7 @@ module "buyer" {
   gcp_project_id       = local.gcp_project_id
   bidding_image        = "${local.image_repo}/bidding_service:${each.value.image_tag}"
   buyer_frontend_image = "${local.image_repo}/buyer_frontend_service:${each.value.image_tag}"
+  fakekv_service_port  = 1900 # Ignore this.
 
   runtime_flags = merge({
     BIDDING_PORT                      = "50051"          # Do not change unless you are modifying the default GCP architecture.
@@ -116,18 +117,21 @@ module "buyer" {
     KV_SERVER_EGRESS_TLS              = "false"          # Do not change unless you are modifying the default GCP architecture.
     TEST_MODE                         = "false"          # Do not change unless you are testing without key fetching.
 
-    ENABLE_BIDDING_SERVICE_BENCHMARK   = "" # Example: "false"
-    BUYER_KV_SERVER_ADDR               = "" # Example: "https://kvserver.com/trusted-signals"
-    TEE_AD_RETRIEVAL_KV_SERVER_ADDR    = "" # Example: "xds:///ad-retrieval-host"
-    TEE_KV_SERVER_ADDR                 = "" # Example: "xds:///kv-service-host"
-    AD_RETRIEVAL_TIMEOUT_MS            = "" # Example: "60000"
-    GENERATE_BID_TIMEOUT_MS            = "" # Example: "60000"
-    BIDDING_SIGNALS_LOAD_TIMEOUT_MS    = "" # Example: "60000"
-    ENABLE_BUYER_FRONTEND_BENCHMARKING = "" # Example: "false"
-    CREATE_NEW_EVENT_ENGINE            = "" # Example: "false"
-    ENABLE_BIDDING_COMPRESSION         = "" # Example: "true"
-    ENABLE_PROTECTED_AUDIENCE          = "" # Example: "true"
-    PS_VERBOSITY                       = "" # Example: "10"
+    ENABLE_BIDDING_SERVICE_BENCHMARK   = ""            # Example: "false"
+    BUYER_KV_SERVER_ADDR               = ""            # Example: "https://kvserver.com/trusted-signals"
+    BUYER_TKV_V2_SERVER_ADDR           = "PLACEHOLDER" # Example: "dns:///kvserver:443"
+    ENABLE_TKV_V2_BROWSER              = ""            # Example: "false"
+    TKV_EGRESS_TLS                     = ""            # Example: "false"
+    TEE_AD_RETRIEVAL_KV_SERVER_ADDR    = ""            # Example: "xds:///ad-retrieval-host"
+    TEE_KV_SERVER_ADDR                 = ""            # Example: "xds:///kv-service-host"
+    AD_RETRIEVAL_TIMEOUT_MS            = ""            # Example: "60000"
+    GENERATE_BID_TIMEOUT_MS            = ""            # Example: "60000"
+    BIDDING_SIGNALS_LOAD_TIMEOUT_MS    = ""            # Example: "60000"
+    ENABLE_BUYER_FRONTEND_BENCHMARKING = ""            # Example: "false"
+    CREATE_NEW_EVENT_ENGINE            = ""            # Example: "false"
+    ENABLE_BIDDING_COMPRESSION         = ""            # Example: "true"
+    ENABLE_PROTECTED_AUDIENCE          = ""            # Example: "true"
+    PS_VERBOSITY                       = ""            # Example: "10"
     # [BEGIN] PAS related params
     ENABLE_PROTECTED_APP_SIGNALS                  = "" # Example: "false"
     PROTECTED_APP_SIGNALS_GENERATE_BID_TIMEOUT_MS = "" # Example: "60000"
@@ -205,6 +209,10 @@ module "buyer" {
     #    "num_interop_threads": 4,
     #    "num_intraop_threads": 4,
     #    "module_name": "tensorflow_v2_14_0",
+    #    "cpuset": [0, 1, 2, 3],
+    #    "tcmalloc_release_bytes_per_sec": 0,
+    #    "tcmalloc_max_total_thread_cache_bytes": 0,
+    #    "tcmalloc_max_per_cpu_cache_bytes": 0,
     # }"
 
     # TCMalloc related config parameters.
@@ -265,3 +273,33 @@ module "inference_dashboard" {
   source      = "../../services/dashboards/inference_dashboard"
   environment = join("|", [for k, v in local.buyer_traffic_splits : k if v.traffic_weight > 0])
 }
+
+# use below to perform an in-place upgrade from pre 4.2 to 4.2 and after, replace $ENV with $local.environment value
+# moved {
+#   from = module.buyer
+#   to   = module.buyer["$ENV"]
+# }
+# moved {
+#   from = module.buyer["$ENV"].module.load_balancing.google_compute_url_map.default
+#   to   = module.buyer_frontend_load_balancing.google_compute_url_map.default
+# }
+# moved {
+#   from = module.buyer["$ENV"].module.load_balancing.google_compute_target_https_proxy.default
+#   to   = module.buyer_frontend_load_balancing.google_compute_target_https_proxy.default
+# }
+# moved {
+#   from = module.buyer["$ENV"].module.load_balancing.google_compute_global_forwarding_rule.xlb_https
+#   to   = module.buyer_frontend_load_balancing.google_compute_global_forwarding_rule.xlb_https
+# }
+# moved {
+#   from = module.buyer["$ENV"].module.load_balancing.google_dns_record_set.default
+#   to   = module.buyer_frontend_load_balancing.google_dns_record_set.default
+# }
+# moved {
+#   from = module.buyer["$ENV"].module.buyer_dashboard
+#   to   = module.buyer_dashboard
+# }
+# moved {
+#   from = module.buyer["$ENV"].module.inference_dashboard
+#   to   = module.inference_dashboard
+# }

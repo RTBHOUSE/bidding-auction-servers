@@ -104,6 +104,7 @@ module "seller" {
   gcp_project_id        = local.gcp_project_id
   auction_image         = "${local.image_repo}/auction_service:${each.value.image_tag}"
   seller_frontend_image = "${local.image_repo}/seller_frontend_service:${each.value.image_tag}"
+  fakekv_service_port   = 1900 # Ignore this.
 
   envoy_port = 51052 # Do not change. Must match production/packaging/gcp/seller_frontend_service/bin/envoy.yaml
   runtime_flags = merge({
@@ -114,24 +115,29 @@ module "seller" {
     SFE_INGRESS_TLS                  = "false"          # Do not change unless you are modifying the default GCP architecture.
     BUYER_EGRESS_TLS                 = "true"           # Do not change unless you are modifying the default GCP architecture.
     AUCTION_EGRESS_TLS               = "false"          # Do not change unless you are modifying the default GCP architecture.
-    TEST_MODE                        = "false"          # Do not change unless you are testing without key fetching.
+    # Note: Setting this flag to true will disable validation of buyerReportWinJsUrls.
+    TEST_MODE = "false" # Do not change unless you are testing without key fetching.
 
-    ENABLE_AUCTION_SERVICE_BENCHMARK       = "" # Example: "false"
-    GET_BID_RPC_TIMEOUT_MS                 = "" # Example: "60000"
-    KEY_VALUE_SIGNALS_FETCH_RPC_TIMEOUT_MS = "" # Example: "60000"
-    SCORE_ADS_RPC_TIMEOUT_MS               = "" # Example: "60000"
-    SELLER_ORIGIN_DOMAIN                   = "" # Example: "https://sellerorigin.com"
-    KEY_VALUE_SIGNALS_HOST                 = "" # Example: "https://keyvaluesignals.com/trusted-signals"
-    BUYER_SERVER_HOSTS                     = "" # Example: "{ \"https://example-bidder.com\": { \"url\": \"dns:///bidding-service-host:443\", \"cloudPlatform\": \"GCP\" } }"
-    SELLER_CLOUD_PLATFORMS_MAP             = "" # Example: "{ \"https://partner-seller1.com\": "GCP", \"https://partner-seller2.com\": "AWS"}"
-    ENABLE_SELLER_FRONTEND_BENCHMARKING    = "" # Example: "false"
-    ENABLE_AUCTION_COMPRESSION             = "" # Example: "false"
-    ENABLE_BUYER_COMPRESSION               = "" # Example: "false"
-    ENABLE_PROTECTED_APP_SIGNALS           = "" # Example: "false"
-    ENABLE_PROTECTED_AUDIENCE              = "" # Example: "true"
-    PS_VERBOSITY                           = "" # Example: "10"
-    CREATE_NEW_EVENT_ENGINE                = "" # Example: "false"
-    SELLER_CODE_FETCH_CONFIG               = "" # Example:
+    ENABLE_AUCTION_SERVICE_BENCHMARK       = ""            # Example: "false"
+    GET_BID_RPC_TIMEOUT_MS                 = ""            # Example: "60000"
+    KEY_VALUE_SIGNALS_FETCH_RPC_TIMEOUT_MS = ""            # Example: "60000"
+    SCORE_ADS_RPC_TIMEOUT_MS               = ""            # Example: "60000"
+    SELLER_ORIGIN_DOMAIN                   = ""            # Example: "https://sellerorigin.com"
+    KEY_VALUE_SIGNALS_HOST                 = ""            # Example: "https://keyvaluesignals.com/trusted-signals"
+    K_ANON_API_KEY                         = "PLACEHOLDER" # API Key used to query k-anon service.
+    ENABLE_TKV_V2_BROWSER                  = ""            # Example: "false"
+    TKV_EGRESS_TLS                         = ""            # Example: "false"
+    TRUSTED_KEY_VALUE_V2_SIGNALS_HOST      = "PLACEHOLDER" # Example: "dns:///keyvaluesignals:443"
+    BUYER_SERVER_HOSTS                     = ""            # Example: "{ \"https://example-bidder.com\": { \"url\": \"dns:///bidding-service-host:443\", \"cloudPlatform\": \"GCP\" } }"
+    SELLER_CLOUD_PLATFORMS_MAP             = ""            # Example: "{ \"https://partner-seller1.com\": "GCP", \"https://partner-seller2.com\": "AWS"}"
+    ENABLE_SELLER_FRONTEND_BENCHMARKING    = ""            # Example: "false"
+    ENABLE_AUCTION_COMPRESSION             = ""            # Example: "false"
+    ENABLE_BUYER_COMPRESSION               = ""            # Example: "false"
+    ENABLE_PROTECTED_APP_SIGNALS           = ""            # Example: "false"
+    ENABLE_PROTECTED_AUDIENCE              = ""            # Example: "true"
+    PS_VERBOSITY                           = ""            # Example: "10"
+    CREATE_NEW_EVENT_ENGINE                = ""            # Example: "false"
+    SELLER_CODE_FETCH_CONFIG               = ""            # Example:
     # "{
     #     "fetchMode": 0,
     #     "auctionJsPath": "",
@@ -154,6 +160,7 @@ module "seller" {
     COLLECTOR_ENDPOINT              = "" # Example: "collector-seller-1-${each.key}.sfe-gcp.com:4317"
     ENABLE_OTEL_BASED_LOGGING       = "" # Example: "false"
     CONSENTED_DEBUG_TOKEN           = "" # Example: "<unique_id>"
+    DEBUG_SAMPLE_RATE_MICRO         = "0"
     ENABLE_REPORT_WIN_INPUT_NOISING = "" # Example: "true"
     # Coordinator-based attestation flags.
     # These flags are production-ready and you do not need to change them.
@@ -191,6 +198,7 @@ module "seller" {
     AUCTION_TCMALLOC_MAX_TOTAL_THREAD_CACHE_BYTES             = "10737418240"
     SFE_TCMALLOC_BACKGROUND_RELEASE_RATE_BYTES_PER_SECOND     = "4096"
     SFE_TCMALLOC_MAX_TOTAL_THREAD_CACHE_BYTES                 = "10737418240"
+    REQUIRE_SCORING_SIGNALS_FOR_SCORING                       = "true"
   }, each.value.runtime_flag_override)
 
   frontend_domain_name               = local.seller_domain_name
@@ -238,3 +246,29 @@ module "seller_dashboard" {
   source      = "../../services/dashboards/seller_dashboard"
   environment = join("|", [for k, v in local.seller_traffic_splits : k if v.traffic_weight > 0])
 }
+
+# use below to perform an in-place upgrade from pre 4.2 to 4.2 and after, replace $ENV with $local.environment value
+# moved {
+#   from = module.seller
+#   to   = module.seller["$ENV"]
+# }
+# moved {
+#   from = module.seller["$ENV"].module.load_balancing.google_compute_url_map.default
+#   to   = module.seller_frontend_load_balancing.google_compute_url_map.default
+# }
+# moved {
+#   from = module.seller["$ENV"].module.load_balancing.google_compute_target_https_proxy.default
+#   to   = module.seller_frontend_load_balancing.google_compute_target_https_proxy.default
+# }
+# moved {
+#   from = module.seller["$ENV"].module.load_balancing.google_compute_global_forwarding_rule.xlb_https
+#   to   = module.seller_frontend_load_balancing.google_compute_global_forwarding_rule.xlb_https
+# }
+# moved {
+#   from = module.seller["$ENV"].module.load_balancing.google_dns_record_set.default
+#   to   = module.seller_frontend_load_balancing.google_dns_record_set.default
+# }
+# moved {
+#   from = module.seller["$ENV"].module.seller_dashboard
+#   to   = module.seller_dashboard
+# }

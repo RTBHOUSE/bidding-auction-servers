@@ -23,8 +23,8 @@
 #include "services/auction_service/reporting/reporting_helper.h"
 #include "services/auction_service/reporting/reporting_response.h"
 #include "services/auction_service/udf_fetcher/adtech_code_version_util.h"
+#include "services/common/constants/common_constants.h"
 #include "services/common/util/json_util.h"
-#include "services/common/util/request_response_constants.h"
 
 namespace privacy_sandbox::bidding_auction_servers {
 namespace {
@@ -50,11 +50,11 @@ inline std::vector<std::shared_ptr<std::string>> GetPASReportWinInput(
       std::make_shared<std::string>(
           dispatch_request_config.enable_adtech_code_logging ? "true"
                                                              : "false");
-  std::string egress_payload(*dispatch_request_data.egress_payload);
+  std::string egress_payload(dispatch_request_data.egress_payload.value_or(""));
   input[PASReportWinArgIndex(PASReportWinArgs::kEgressPayload)] =
       std::make_shared<std::string>(std::move(egress_payload));
   std::string temporary_unlimited_egress_payload(
-      *dispatch_request_data.temporary_unlimited_egress_payload);
+      dispatch_request_data.temporary_unlimited_egress_payload.value_or(""));
   input[PASReportWinArgIndex(
       PASReportWinArgs::kTemporaryUnlimitedEgressPayload)] =
       std::make_shared<std::string>(
@@ -120,7 +120,7 @@ absl::Status PerformPASReportWin(
       dispatch_request,
       GetPASReportWinDispatchRequest(dispatch_request_config, request_data,
                                      buyer_device_signals));
-  dispatch_request.tags[kRomaTimeoutMs] =
+  dispatch_request.tags[kRomaTimeoutTag] =
       dispatch_request_config.roma_timeout_ms;
   std::vector<DispatchRequest> dispatch_requests = {
       std::move(dispatch_request)};

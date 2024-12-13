@@ -94,7 +94,10 @@ module "buyer" {
     BIDDING_SERVER_ADDR              = local.use_service_mesh ? "dns:///bidding-${local.buyer_operator}-${local.environment}-appmesh-virtual-service.${local.buyer_root_domain}:50051" : "dns:///bidding-${local.environment}.${local.buyer_root_domain}:443"
     GRPC_ARG_DEFAULT_AUTHORITY       = local.use_service_mesh ? "bidding-${local.buyer_operator}-${local.environment}-appmesh-virtual-service.${local.buyer_root_domain}" : "PLACEHOLDER" # "PLACEHOLDER" is a special value that will be ignored by B&A servers. Leave it unchanged if running with Load Balancers.
     # Refers to BYOS Buyer Key-Value Server only.
-    BUYER_KV_SERVER_ADDR                                  = "" # Example: "https://kvserver.com/trusted-signals"
+    BUYER_KV_SERVER_ADDR                                  = ""            # Example: "https://kvserver.com/trusted-signals"
+    BUYER_TKV_V2_SERVER_ADDR                              = "PLACEHOLDER" # Example: "dns:///kvserver:443"
+    ENABLE_TKV_V2_BROWSER                                 = ""            # Example: "false"
+    TKV_EGRESS_TLS                                        = ""            # Example: "false"
     TEE_AD_RETRIEVAL_KV_SERVER_ADDR                       = "${local.tee_ad_retrieval_kv_server_address}"
     TEE_AD_RETRIEVAL_KV_SERVER_GRPC_ARG_DEFAULT_AUTHORITY = local.use_service_mesh ? "${local.tee_ad_retrieval_kv_server_domain}" : "PLACEHOLDER"
     TEE_KV_SERVER_ADDR                                    = "${local.tee_kv_server_address}"
@@ -166,10 +169,20 @@ module "buyer" {
     MAX_ALLOWED_SIZE_DEBUG_URL_BYTES   = "" # Example: "65536"
     MAX_ALLOWED_SIZE_ALL_DEBUG_URLS_KB = "" # Example: "3000"
 
-    INFERENCE_SIDECAR_BINARY_PATH   = "" # Example: "/server/bin/inference_sidecar_<module_name>"
-    INFERENCE_MODEL_BUCKET_NAME     = "" # Example: "<bucket_name>"
-    INFERENCE_MODEL_CONFIG_PATH     = "" # Example: "model_config.json"
-    INFERENCE_MODEL_FETCH_PERIOD_MS = "" # Example: "60000"
+    INFERENCE_SIDECAR_BINARY_PATH    = "" # Example: "/server/bin/inference_sidecar_<module_name>"
+    INFERENCE_MODEL_BUCKET_NAME      = "" # Example: "<bucket_name>"
+    INFERENCE_MODEL_CONFIG_PATH      = "" # Example: "model_config.json"
+    INFERENCE_MODEL_FETCH_PERIOD_MS  = "" # Example: "60000"
+    INFERENCE_SIDECAR_RUNTIME_CONFIG = "" # Example:
+    # "{
+    #    "num_interop_threads": 4,
+    #    "num_intraop_threads": 4,
+    #    "module_name": "tensorflow_v2_14_0",
+    #    "cpuset": [0, 1, 2, 3],
+    #    "tcmalloc_release_bytes_per_sec": 0,
+    #    "tcmalloc_max_total_thread_cache_bytes": 0,
+    #    "tcmalloc_max_per_cpu_cache_bytes": 0,
+    # }"
 
     # TCMalloc related config parameters.
     # See: https://github.com/google/tcmalloc/blob/master/docs/tuning.md
@@ -177,6 +190,9 @@ module "buyer" {
     BIDDING_TCMALLOC_MAX_TOTAL_THREAD_CACHE_BYTES             = "10737418240"
     BFE_TCMALLOC_BACKGROUND_RELEASE_RATE_BYTES_PER_SECOND     = "4096"
     BFE_TCMALLOC_MAX_TOTAL_THREAD_CACHE_BYTES                 = "10737418240"
+
+    ENABLE_CHAFFING        = "false"
+    ENABLE_PRIORITY_VECTOR = "false"
   }
   consented_request_s3_bucket = "" # Example: ${name of a s3 bucket}
 }
