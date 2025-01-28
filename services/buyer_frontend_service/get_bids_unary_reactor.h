@@ -44,6 +44,7 @@
 #include "services/common/util/cancellation_wrapper.h"
 #include "services/common/util/client_contexts.h"
 #include "src/encryption/key_fetcher/interface/key_fetcher_manager_interface.h"
+#include "src/concurrent/executor.h"
 
 namespace privacy_sandbox::bidding_auction_servers {
 
@@ -75,18 +76,9 @@ class GetBidsUnaryReactor : public grpc::ServerUnaryReactor {
       grpc::CallbackServerContext& context,
       const GetBidsRequest& get_bids_request,
       GetBidsResponse& get_bids_response,
-      BiddingSignalsAsyncProvider& bidding_signals_async_provider,
-      BiddingAsyncClient& bidding_async_client, const GetBidsConfig& config,
-      server_common::KeyFetcherManagerInterface* key_fetcher_manager,
-      CryptoClientWrapperInterface* crypto_client,
-      KVAsyncClient* kv_async_client, bool enable_benchmarking = false);
-
-  explicit GetBidsUnaryReactor(
-      grpc::CallbackServerContext& context,
-      const GetBidsRequest& get_bids_request,
-      GetBidsResponse& get_bids_response,
       const BiddingSignalsAsyncProvider& bidding_signals_async_provider,
       BiddingAsyncClient& bidding_async_client, const GetBidsConfig& config,
+      server_common::Executor* executor,
       ProtectedAppSignalsBiddingAsyncClient* pas_bidding_async_client,
       server_common::KeyFetcherManagerInterface* key_fetcher_manager,
       CryptoClientWrapperInterface* crypto_client,
@@ -179,6 +171,7 @@ class GetBidsUnaryReactor : public grpc::ServerUnaryReactor {
   ProtectedAppSignalsBiddingAsyncClient*
       protected_app_signals_bidding_async_client_;
   const GetBidsConfig& config_;
+  server_common::Executor* executor_;
   server_common::KeyFetcherManagerInterface* key_fetcher_manager_;
   CryptoClientWrapperInterface* crypto_client_;
   std::unique_ptr<BenchmarkingLogger> benchmarking_logger_;

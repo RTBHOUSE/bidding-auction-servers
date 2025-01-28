@@ -304,6 +304,7 @@ absl::Status RunServer() {
           absl::GetFlag(FLAGS_enable_kanon),
           config_client.GetIntParameter(DEBUG_SAMPLE_RATE_MICRO),
       },
+      executor.get(),
       enable_buyer_frontend_benchmarking);
 
   grpc::EnableDefaultHealthCheckService(true);

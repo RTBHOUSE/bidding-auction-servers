@@ -131,6 +131,7 @@ GetBidsUnaryReactor::GetBidsUnaryReactor(
     const GetBidsRequest& get_bids_request, GetBidsResponse& get_bids_response,
     const BiddingSignalsAsyncProvider& bidding_signals_async_provider,
     BiddingAsyncClient& bidding_async_client, const GetBidsConfig& config,
+    server_common::Executor* executor,
     ProtectedAppSignalsBiddingAsyncClient* pas_bidding_async_client,
     server_common::KeyFetcherManagerInterface* key_fetcher_manager,
     CryptoClientWrapperInterface* crypto_client, KVAsyncClient* kv_async_client,
@@ -151,6 +152,7 @@ GetBidsUnaryReactor::GetBidsUnaryReactor(
       bidding_async_client_(&bidding_async_client),
       protected_app_signals_bidding_async_client_(pas_bidding_async_client),
       config_(config),
+      executor_(executor),
       key_fetcher_manager_(key_fetcher_manager),
       crypto_client_(crypto_client),
       chaffing_enabled_(config_.is_chaffing_enabled),
@@ -202,20 +204,6 @@ GetBidsUnaryReactor::GetBidsUnaryReactor(
          protected_app_signals_bidding_async_client_ != nullptr)
       << "PAS is enabled but no PAS bidding async client available";
 }
-
-GetBidsUnaryReactor::GetBidsUnaryReactor(
-    grpc::CallbackServerContext& context,
-    const GetBidsRequest& get_bids_request, GetBidsResponse& get_bids_response,
-    BiddingSignalsAsyncProvider& bidding_signals_async_provider,
-    BiddingAsyncClient& bidding_async_client, const GetBidsConfig& config,
-    server_common::KeyFetcherManagerInterface* key_fetcher_manager,
-    CryptoClientWrapperInterface* crypto_client, KVAsyncClient* kv_async_client,
-    bool enable_benchmarking)
-    : GetBidsUnaryReactor(context, get_bids_request, get_bids_response,
-                          bidding_signals_async_provider, bidding_async_client,
-                          config, /*pas_bidding_async_client=*/nullptr,
-                          key_fetcher_manager, crypto_client, kv_async_client,
-                          enable_benchmarking) {}
 
 void GetBidsUnaryReactor::OnAllBidsDone(bool any_successful_bids) {
   if (enable_cancellation_ && context_->IsCancelled()) {
@@ -417,7 +405,6 @@ void GetBidsUnaryReactor::CancellableExecuteChaffRequest() {
   std::uniform_int_distribution<size_t> request_duration_dist(
       kMinChaffRequestDurationMs, kMaxChaffRequestDurationMs);
   chaff_request_duration = request_duration_dist(*generator_);
-  absl::SleepFor(absl::Milliseconds((int)chaff_request_duration));
 
   // Produce chaff response.
   size_t chaff_response_size = 0;
@@ -446,7 +433,10 @@ void GetBidsUnaryReactor::CancellableExecuteChaffRequest() {
   PS_VLOG(kNoisyInfo, log_context_) << "Chaff request encrypted successfully";
   get_bids_response_->set_response_ciphertext(
       aead_encrypt->encrypted_data().ciphertext());
-  FinishWithStatus(grpc::Status::OK);
+
+  executor_->RunAfter(
+      absl::Milliseconds((int)chaff_request_duration),
+      [this]() { FinishWithStatus(grpc::Status::OK); });
 }
 
 void GetBidsUnaryReactor::LogInitiatedRequestErrorMetrics(

@@ -33,9 +33,11 @@ BuyerFrontEndService::BuyerFrontEndService(
         key_fetcher_manager,
     std::unique_ptr<CryptoClientWrapperInterface> crypto_client,
     std::unique_ptr<KVAsyncClient> kv_async_client, const GetBidsConfig config,
+    server_common::Executor* executor,
     bool enable_benchmarking)
     : bidding_signals_async_provider_(
           std::move(bidding_signals_async_provider)),
+      executor_(executor),
       config_(config),
       enable_benchmarking_(enable_benchmarking),
       key_fetcher_manager_(std::move(key_fetcher_manager)),
@@ -58,20 +60,6 @@ BuyerFrontEndService::BuyerFrontEndService(
         config_.debug_sample_rate_micro <= 1'000'000);
 }
 
-BuyerFrontEndService::BuyerFrontEndService(ClientRegistry client_registry,
-                                           const GetBidsConfig config,
-                                           bool enable_benchmarking)
-    : bidding_signals_async_provider_(
-          std::move(client_registry.bidding_signals_async_provider)),
-      config_(config),
-      enable_benchmarking_(enable_benchmarking),
-      key_fetcher_manager_(std::move(client_registry.key_fetcher_manager)),
-      crypto_client_(std::move(client_registry.crypto_client)),
-      bidding_async_client_(std::move(client_registry.bidding_async_client)),
-      protected_app_signals_bidding_async_client_(std::move(
-          client_registry.protected_app_signals_bidding_async_client)),
-      kv_async_client_(std::move(client_registry.kv_async_client)) {}
-
 grpc::ServerUnaryReactor* BuyerFrontEndService::GetBids(
     grpc::CallbackServerContext* context, const GetBidsRequest* request,
     GetBidsResponse* response) {
@@ -80,7 +68,7 @@ grpc::ServerUnaryReactor* BuyerFrontEndService::GetBids(
   // Will be deleted in onDone
   auto reactor = std::make_unique<GetBidsUnaryReactor>(
       *context, *request, *response, *bidding_signals_async_provider_,
-      *bidding_async_client_, config_,
+      *bidding_async_client_, config_, executor_,
       protected_app_signals_bidding_async_client_.get(),
       key_fetcher_manager_.get(), crypto_client_.get(), kv_async_client_.get(),
       enable_benchmarking_);

@@ -25,21 +25,9 @@
 #include "services/common/clients/bidding_server/bidding_async_client.h"
 #include "services/common/clients/kv_server/kv_async_client.h"
 #include "src/encryption/key_fetcher/interface/key_fetcher_manager_interface.h"
+#include "src/concurrent/executor.h"
 
 namespace privacy_sandbox::bidding_auction_servers {
-
-// This a utility class that acts as a wrapper for the clients that are used
-// by BuyerFrontEndService.
-struct ClientRegistry {
-  std::unique_ptr<BiddingSignalsAsyncProvider> bidding_signals_async_provider;
-  std::unique_ptr<BiddingAsyncClient> bidding_async_client;
-  std::unique_ptr<ProtectedAppSignalsBiddingAsyncClient>
-      protected_app_signals_bidding_async_client;
-  std::unique_ptr<server_common::KeyFetcherManagerInterface>
-      key_fetcher_manager;
-  std::unique_ptr<CryptoClientWrapperInterface> crypto_client;
-  std::unique_ptr<KVAsyncClient> kv_async_client;
-};
 
 // BuyerFrontEndService provides the async server implementation to be used
 // by Demand Side/Buyers to provide bids to the Seller Frontend Service
@@ -56,11 +44,7 @@ class BuyerFrontEndService final : public BuyerFrontEnd::CallbackService {
           key_fetcher_manager,
       std::unique_ptr<CryptoClientWrapperInterface> crypto_client,
       std::unique_ptr<KVAsyncClient> kv_async_client,
-      const GetBidsConfig config, bool enable_benchmarking = false);
-
-  explicit BuyerFrontEndService(ClientRegistry client_registry,
-                                const GetBidsConfig config,
-                                bool enable_benchmarking = false);
+      const GetBidsConfig config, server_common::Executor* executor = nullptr, bool enable_benchmarking = false);
 
   // Returns bid for the top eligible ad candidate.
   //
@@ -82,6 +66,7 @@ class BuyerFrontEndService final : public BuyerFrontEnd::CallbackService {
   // The Bidding signals provider is used to fetch signals required for bidding
   // from external sources, such as a KeyValue server or an HTTP server.
   std::unique_ptr<BiddingSignalsAsyncProvider> bidding_signals_async_provider_;
+  server_common::Executor* executor_;
   // Config for modifying behaviour of GetBidsUnaryReactor.
   const GetBidsConfig config_;
   bool enable_benchmarking_;
