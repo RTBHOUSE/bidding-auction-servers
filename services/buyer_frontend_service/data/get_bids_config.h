@@ -15,9 +15,15 @@
 #ifndef SERVICES_BUYER_FRONTEND_SERVICE_DATA_GET_BIDS_CONFIG_H_
 #define SERVICES_BUYER_FRONTEND_SERVICE_DATA_GET_BIDS_CONFIG_H_
 
-#include <string>
+#include <cstdint>
 
 namespace privacy_sandbox::bidding_auction_servers {
+
+enum class BiddingSignalsFetchMode : std::uint8_t {
+  REQUIRED = 0,
+  FETCHED_BUT_OPTIONAL = 1,
+  NOT_FETCHED = 2,
+};
 
 struct GetBidsConfig {
   // The max time to wait for generate bid request to finish.
@@ -33,12 +39,21 @@ struct GetBidsConfig {
   bool is_protected_audience_enabled;
   // Whether chaffing is enabled.
   bool is_chaffing_enabled;
-  // Enable v2 for tkv
-  bool is_tkv_v2_enabled;
+  // Enable v2 for browser
+  bool is_tkv_v2_browser_enabled;
   bool enable_cancellation = false;
   bool enable_kanon = false;
   // Sample rate for debug request.
-  int debug_sample_rate_micro;
+  int debug_sample_rate_micro = 0;
+  // make all request consented in non_prod
+  bool consent_all_requests = false;
+  bool priority_vector_enabled = false;
+  bool test_mode = false;
+  bool tkv_v2_address_empty = false;
+  BiddingSignalsFetchMode bidding_signals_fetch_mode =
+      BiddingSignalsFetchMode::REQUIRED;
+  // TKV per buyer signals propagation
+  bool propagate_buyer_signals_to_tkv = false;
 };
 
 }  // namespace privacy_sandbox::bidding_auction_servers

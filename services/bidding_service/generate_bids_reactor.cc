@@ -28,6 +28,7 @@
 #include "services/bidding_service/code_wrapper/buyer_code_wrapper.h"
 #include "services/bidding_service/constants.h"
 #include "services/bidding_service/utils/validation.h"
+#include "services/common/constants/common_constants.h"
 #include "services/common/util/cancellation_wrapper.h"
 #include "services/common/util/error_categories.h"
 #include "services/common/util/json_util.h"
@@ -59,6 +60,7 @@ constexpr char kTopLevelSeller[] = "topLevelSeller";
 constexpr char kJoinCount[] = "joinCount";
 constexpr char kBidCount[] = "bidCount";
 constexpr char kRecency[] = "recency";
+constexpr char kMultiBidLimit[] = "multiBidLimit";
 constexpr char kPrevWins[] = "prevWins";
 constexpr char kJsonStringEnd[] = R"JSON(",")JSON";
 constexpr char kJsonStringValueStart[] = R"JSON(":")JSON";
@@ -70,7 +72,9 @@ constexpr char kEmptyDeviceSignals[] = R"JSON({})JSON";
 std::string MakeBrowserSignalsForScript(absl::string_view publisher_name,
                                         absl::string_view seller,
                                         absl::string_view top_level_seller,
-                                        const BrowserSignals& browser_signals) {
+                                        const BrowserSignals& browser_signals,
+                                        uint32_t data_version,
+                                        int32_t multi_bid_limit) {
   std::string device_signals_str = absl::StrCat(
       R"JSON({")JSON", kTopWindowHostname, kJsonStringValueStart,
       publisher_name, kJsonStringEnd, kSeller, kJsonStringValueStart, seller);
@@ -92,7 +96,9 @@ std::string MakeBrowserSignalsForScript(absl::string_view publisher_name,
       recency_ms, kJsonValueEnd, kPrevWins, kJsonValueStart,
       browser_signals.prev_wins().empty() ? kJsonEmptyString
                                           : browser_signals.prev_wins(),
-      "}");
+      kJsonValueEnd, kDataVersion, kJsonValueStart, data_version, kJsonValueEnd,
+      kMultiBidLimit, kJsonValueStart,
+      multi_bid_limit > 0 ? multi_bid_limit : kDefaultMultiBidLimit, "}");
   return device_signals_str;
 }
 
@@ -196,11 +202,10 @@ absl::StatusOr<DispatchRequest> BuildGenerateBidRequest(
     const std::vector<std::shared_ptr<std::string>>& base_input,
     const bool enable_buyer_debug_url_generation,
     RequestLogContext& log_context, const bool enable_adtech_code_logging,
-    const std::string& version) {
+    absl::string_view version) {
   // Construct the wrapper struct for our V8 Dispatch Request.
   DispatchRequest generate_bid_request;
   generate_bid_request.id = interest_group.name();
-  // TODO(b/258790164) Update after code is fetched periodically.
   generate_bid_request.version_string = version;
   // Copy base input and amend with custom interest_group
   generate_bid_request.input = base_input;
@@ -220,7 +225,8 @@ absl::StatusOr<DispatchRequest> BuildGenerateBidRequest(
     generate_bid_request.input[ArgIndex(GenerateBidArgs::kDeviceSignals)] =
         std::make_shared<std::string>(MakeBrowserSignalsForScript(
             raw_request.publisher_name(), raw_request.seller(),
-            raw_request.top_level_seller(), interest_group.browser_signals()));
+            raw_request.top_level_seller(), interest_group.browser_signals(),
+            raw_request.data_version(), raw_request.multi_bid_limit()));
   } else if (interest_group.has_android_signals() &&
              interest_group.android_signals().IsInitialized() &&
              !differencer.Equals(AndroidSignals::default_instance(),
@@ -289,17 +295,26 @@ GenerateBidsReactor::GenerateBidsReactor(
       auction_scope_(
           raw_request_.top_level_seller().empty()
               ? AuctionScope::AUCTION_SCOPE_SINGLE_SELLER
-              : AuctionScope::AUCTION_SCOPE_DEVICE_COMPONENT_MULTI_SELLER),
-      protected_auction_generate_bid_version_(
-          runtime_config.default_protected_auction_generate_bid_version) {
+              : AuctionScope::AUCTION_SCOPE_DEVICE_COMPONENT_MULTI_SELLER) {
   CHECK_OK([this]() {
     PS_ASSIGN_OR_RETURN(metric_context_,
                         metric::BiddingContextMap()->Remove(request_));
     if (log_context_.is_consented()) {
       metric_context_->SetConsented(raw_request_.log_context().generation_id());
+    } else if (log_context_.is_prod_debug()) {
+      metric_context_->SetConsented(kProdDebug.data());
     }
     return absl::OkStatus();
   }()) << "BiddingContextMap()->Get(request) should have been called";
+
+  if (runtime_config.use_per_request_udf_versioning) {
+    protected_audience_generate_bid_version_ =
+        raw_request_.blob_versions().protected_audience_generate_bid_udf();
+  }
+  if (protected_audience_generate_bid_version_.empty()) {
+    protected_audience_generate_bid_version_ =
+        runtime_config.default_protected_audience_generate_bid_version;
+  }
 }
 
 void GenerateBidsReactor::Execute() {
@@ -309,13 +324,17 @@ void GenerateBidsReactor::Execute() {
     return;
   }
   benchmarking_logger_->BuildInputBegin();
-
-  PS_VLOG(kEncrypted, log_context_)
-      << "Encrypted GenerateBidsRequest exported in EventMessage";
-  log_context_.SetEventMessageField(*request_);
-  PS_VLOG(kPlain, log_context_)
-      << "GenerateBidsRawRequest exported in EventMessage";
-  log_context_.SetEventMessageField(raw_request_);
+  if (server_common::log::PS_VLOG_IS_ON(kPlain)) {
+    if (server_common::log::PS_VLOG_IS_ON(kEncrypted)) {
+      PS_VLOG(kEncrypted, log_context_)
+          << "Encrypted GenerateBidsRequest exported in EventMessage if "
+             "consented";
+      log_context_.SetEventMessageField(*request_);
+    }
+    PS_VLOG(kPlain, log_context_)
+        << "GenerateBidsRawRequest exported in EventMessage if consented";
+    log_context_.SetEventMessageField(raw_request_);
+  }
 
   auto interest_groups = raw_request_.interest_group_for_bidding();
   if (interest_groups.empty()) {
@@ -336,37 +355,18 @@ void GenerateBidsReactor::Execute() {
         BuildGenerateBidRequest(interest_groups.at(i), raw_request_, base_input,
                                 enable_buyer_debug_url_generation_,
                                 log_context_, enable_adtech_code_logging_,
-                                protected_auction_generate_bid_version_);
+                                protected_audience_generate_bid_version_);
     if (!generate_bid_request.ok()) {
       PS_VLOG(kNoisyWarn, log_context_)
           << "Unable to build GenerateBidRequest: "
           << generate_bid_request.status().ToString(
                  absl::StatusToStringMode::kWithEverything);
     } else {
-      // Create new metric context for Inference metrics.
-      metric::MetricContextMap<google::protobuf::Message>()->Get(request_);
-      // Make metric_context a unique_ptr by releasing the ownership of the
-      // context from ContextMap.
-      absl::StatusOr<std::unique_ptr<metric::BiddingContext>> metric_context =
-          metric::MetricContextMap<google::protobuf::Message>()->Remove(
-              request_);
-      CHECK_OK(metric_context);
       auto dispatch_request = generate_bid_request.value();
-      dispatch_request.tags[kTimeoutMs] = roma_timeout_ms_;
-      RomaRequestSharedContextBidding shared_context =
-          roma_request_context_factory_.Create();
-      auto roma_shared_context = shared_context.GetRomaRequestContext();
-      if (roma_shared_context.ok()) {
-        std::shared_ptr<RomaRequestContextBidding> roma_request_context =
-            roma_shared_context.value();
-        roma_request_context->SetMetricContext(
-            std::move(metric_context.value()));
-      } else {
-        PS_LOG(ERROR, log_context_)
-            << "Failed to retrieve RomaRequestContextBidding: "
-            << roma_shared_context.status();
-      }
-      dispatch_request.metadata = shared_context;
+      dispatch_request.metadata =
+          RomaSharedContextWithMetric<google::protobuf::Message>(
+              request_, roma_request_context_factory_.Create(), log_context_);
+      dispatch_request.tags[kRomaTimeoutTag] = roma_timeout_ms_;
       dispatch_requests_.push_back(dispatch_request);
     }
   }
@@ -398,6 +398,10 @@ void GenerateBidsReactor::Execute() {
           }));
 
   if (!status.ok()) {
+    LogIfError(
+        metric_context_->LogHistogram<metric::kBiddingFailedToBidPercent>(1.0));
+    LogIfError(
+        metric_context_->LogHistogram<metric::kBiddingTotalBidsCount>(0));
     LogIfError(metric_context_
                    ->AccumulateMetric<metric::kBiddingErrorCountByErrorCode>(
                        1, metric::kBiddingGenerateBidsFailedToDispatchCode));
@@ -415,7 +419,7 @@ void GenerateBidsReactor::Execute() {
 // https://github.com/WICG/turtledove/blob/main/FLEDGE.md#32-on-device-bidding
 void GenerateBidsReactor::GenerateBidsCallback(
     const std::vector<absl::StatusOr<DispatchResponse>>& output) {
-  if (server_common::log::PS_VLOG_IS_ON(2)) {
+  if (server_common::log::PS_VLOG_IS_ON(kDispatch)) {
     for (const auto& dispatch_response : output) {
       PS_VLOG(kDispatch, log_context_)
           << "Generate Bids V8 Response: " << dispatch_response.status();
@@ -424,53 +428,79 @@ void GenerateBidsReactor::GenerateBidsCallback(
       }
     }
   }
-  int total_bid_count = static_cast<int>(output.size());
-  if (total_bid_count == 0) {
+
+  if (output.empty()) {
     PS_LOG(INFO, log_context_)
         << "Received empty response array from Generate Bids V8 response.";
-    // TODO(b/368624844): Add an EmptyResponse error code to
-    // kBiddingErrorCountByErrorCount metric.
+    LogIfError(
+        metric_context_->LogHistogram<metric::kBiddingFailedToBidPercent>(1.0));
+    LogIfError(
+        metric_context_->LogHistogram<metric::kBiddingTotalBidsCount>(0));
     return;
   }
-  LogIfError(metric_context_->AccumulateMetric<metric::kBiddingTotalBidsCount>(
-      total_bid_count));
+
   benchmarking_logger_->HandleResponseBegin();
+  int failed_to_bid_count = 0;
+  int received_bid_count = 0;
   int zero_bid_count = 0;
-  int failed_requests = 0;
+  int total_debug_urls_count = 0;
   long total_debug_urls_chars = 0;
+  int rejected_component_bid_count = 0;
+
   // Iterate through every result in the output.
   for (int i = 0; i < output.size(); i++) {
     auto& result = output.at(i);
-    // Error result due to invalid execution.
     if (!result.ok()) {
-      failed_requests = failed_requests + 1;
-      LogIfError(metric_context_
-                     ->AccumulateMetric<metric::kBiddingErrorCountByErrorCode>(
-                         1, metric::kBiddingGenerateBidsDispatchResponseError));
-      PS_LOG(ERROR, log_context_)
-          << "Invalid execution (possibly invalid input): "
-          << result.status().ToString(
-                 absl::StatusToStringMode::kWithEverything);
-      LogIfError(
-          metric_context_->AccumulateMetric<metric::kUdfExecutionErrorCount>(
-              1));
+      failed_to_bid_count += 1;
+      // Error result due to execution timeout.
+      if (absl::StrContains(result.status().message(), "timeout")) {
+        PS_LOG(ERROR, log_context_)
+            << "Execution timed out: "
+            << result.status().ToString(
+                   absl::StatusToStringMode::kWithEverything);
+        LogIfError(
+            metric_context_
+                ->AccumulateMetric<metric::kBiddingErrorCountByErrorCode>(
+                    1, metric::kBiddingGenerateBidsTimedOutError));
+      } else {
+        // Error result due to invalid execution.
+        PS_LOG(ERROR, log_context_)
+            << "Invalid execution (possibly invalid input): "
+            << result.status().ToString(
+                   absl::StatusToStringMode::kWithEverything);
+        LogIfError(
+            metric_context_
+                ->AccumulateMetric<metric::kBiddingErrorCountByErrorCode>(
+                    1, metric::kBiddingGenerateBidsDispatchResponseError));
+        LogIfError(
+            metric_context_->AccumulateMetric<metric::kUdfExecutionErrorCount>(
+                1));
+      }
       continue;
     }
+
     // Parse JSON response from the result.
     absl::StatusOr<std::vector<std::string>> generate_bid_responses =
         ParseAndGetResponseJsonArray(enable_adtech_code_logging_, result->resp,
                                      log_context_);
     if (!generate_bid_responses.ok()) {
+      failed_to_bid_count += 1;
       PS_LOG(ERROR, log_context_)
           << "Failed to parse response from Roma "
           << generate_bid_responses.status().ToString(
                  absl::StatusToStringMode::kWithEverything);
+      LogIfError(metric_context_
+                     ->AccumulateMetric<metric::kBiddingErrorCountByErrorCode>(
+                         1, metric::kBiddingGenerateBidsDispatchResponseError));
       continue;
     }
+
     // Convert JSON response to AdWithBid proto.
     google::protobuf::json::ParseOptions parse_options;
     parse_options.ignore_unknown_fields = true;
     const std::string interest_group_name = result->id;
+    int received_bid_count_for_current_response = 0;
+    bool failed_to_parse_bid = false;
     for (const auto& bid_response : *generate_bid_responses) {
       AdWithBid bid;
       auto valid = google::protobuf::util::JsonStringToMessage(
@@ -479,8 +509,18 @@ void GenerateBidsReactor::GenerateBidsCallback(
         PS_LOG(ERROR, log_context_)
             << "Invalid json output from code execution for interest_group "
             << interest_group_name << ": " << bid_response;
+        failed_to_parse_bid = true;
         continue;
       }
+
+      if (bid.ad().has_string_value()) {
+        // Escape string so that this can be properly processed by the V8 engine
+        // in Auction service.
+        bid.mutable_ad()->set_string_value(
+            absl::StrCat("\"", bid.ad().string_value(), "\""));
+      }
+      received_bid_count_for_current_response += 1;
+
       // Validate AdWithBid proto.
       if (absl::Status validation_status =
               IsValidProtectedAudienceBid(bid, auction_scope_);
@@ -488,36 +528,72 @@ void GenerateBidsReactor::GenerateBidsCallback(
         PS_VLOG(kNoisyWarn, log_context_) << validation_status.message();
         if (validation_status.code() == absl::StatusCode::kInvalidArgument) {
           zero_bid_count += 1;
-          LogIfError(
-              metric_context_->AccumulateMetric<metric::kBiddingZeroBidCount>(
-                  1));
+        } else if (validation_status.code() ==
+                   absl::StatusCode::kPermissionDenied) {
+          // Received allowComponentAuction=false.
+          ++rejected_component_bid_count;
         }
         continue;
       }
+
       // Trim debug URLs for validated AdWithBid proto and add it to
       // GenerateBidsResponse.
-      total_debug_urls_chars +=
+      DebugUrlsSize debug_urls_size =
           TrimAndReturnDebugUrlsSize(bid, max_allowed_size_debug_url_chars_,
                                      max_allowed_size_all_debug_urls_chars_,
                                      total_debug_urls_chars, log_context_);
+      total_debug_urls_count += (debug_urls_size.win_url_chars > 0) +
+                                (debug_urls_size.loss_url_chars > 0);
+      total_debug_urls_chars +=
+          debug_urls_size.win_url_chars + debug_urls_size.loss_url_chars;
       bid.set_data_version(raw_request_.data_version());
       bid.set_interest_group_name(interest_group_name);
       *raw_response_.add_bids() = std::move(bid);
     }
+
+    if (failed_to_parse_bid) {
+      LogIfError(metric_context_
+                     ->AccumulateMetric<metric::kBiddingErrorCountByErrorCode>(
+                         1, metric::kBiddingGenerateBidsDispatchResponseError));
+    }
+    if (received_bid_count_for_current_response == 0) {
+      failed_to_bid_count += 1;
+    }
+    received_bid_count += received_bid_count_for_current_response;
   }
-  LogIfError(metric_context_->LogHistogram<metric::kBiddingZeroBidPercent>(
-      (static_cast<double>(zero_bid_count)) / total_bid_count));
-  PS_VLOG(kNoisyInfo, log_context_)
-      << "\n\nFailed of total: " << failed_requests << "/" << output.size();
+
+  LogIfError(metric_context_->LogHistogram<metric::kBiddingFailedToBidPercent>(
+      (static_cast<double>(failed_to_bid_count)) / output.size()));
+  LogIfError(metric_context_->LogHistogram<metric::kBiddingTotalBidsCount>(
+      received_bid_count));
+  if (received_bid_count > 0) {
+    LogIfError(metric_context_->LogUpDownCounter<metric::kBiddingZeroBidCount>(
+        zero_bid_count));
+    LogIfError(metric_context_->LogHistogram<metric::kBiddingZeroBidPercent>(
+        (static_cast<double>(zero_bid_count)) / received_bid_count));
+  }
+  if (rejected_component_bid_count > 0) {
+    LogIfError(
+        metric_context_->LogUpDownCounter<metric::kBiddingBidRejectedCount>(
+            rejected_component_bid_count));
+  }
+  LogIfError(metric_context_->LogUpDownCounter<metric::kBiddingDebugUrlCount>(
+      total_debug_urls_count));
+  LogIfError(metric_context_->LogHistogram<metric::kBiddingDebugUrlsSizeBytes>(
+      static_cast<double>(total_debug_urls_chars)));
   benchmarking_logger_->HandleResponseEnd();
 }
 
 void GenerateBidsReactor::EncryptResponseAndFinish(grpc::Status status) {
-  PS_VLOG(kPlain, log_context_)
-      << "GenerateBidsRawResponse exported in EventMessage";
-  log_context_.SetEventMessageField(raw_response_);
+  raw_response_.set_bidding_export_debug(log_context_.ShouldExportEvent());
+  if (server_common::log::PS_VLOG_IS_ON(kPlain)) {
+    PS_VLOG(kPlain, log_context_)
+        << "GenerateBidsRawResponse exported in EventMessage if consented";
+    log_context_.SetEventMessageField(raw_response_);
+  }
   // ExportEventMessage before encrypt response
-  log_context_.ExportEventMessage(/*if_export_consented=*/true);
+  log_context_.ExportEventMessage(/*if_export_consented=*/true,
+                                  log_context_.ShouldExportEvent());
 
   if (!EncryptResponse()) {
     PS_LOG(ERROR, log_context_)

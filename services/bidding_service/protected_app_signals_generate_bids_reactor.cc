@@ -56,7 +56,6 @@ inline constexpr uint32_t kDefaultEgressProtocol = 0;
 inline constexpr uint32_t kEgressProtocolBitWidth = 5;
 // Hardcoded egress schema version till we support multi-version model for
 // egress schema.
-inline constexpr uint32_t kDefaultEgressSchemaVersion = 2;
 
 inline constexpr std::array<std::pair<std::string_view, std::string_view>, 3>
     kBuyerMetadataKeysMap = {{{kAcceptLanguageKey, kAcceptLanguageKey},
@@ -196,9 +195,6 @@ ProtectedAppSignalsGenerateBidsReactor::ProtectedAppSignalsGenerateBidsReactor(
       ad_bids_retrieval_timeout_ms_(runtime_config.ad_retrieval_timeout_ms),
       metadata_(GrpcMetadataToRequestMetadata(context->client_metadata(),
                                               kBuyerMetadataKeysMap)),
-      protected_app_signals_generate_bid_version_(
-          runtime_config.default_protected_app_signals_generate_bid_version),
-      ad_retrieval_version_(runtime_config.default_ad_retrieval_version),
       egress_schema_cache_(egress_schema_cache),
       limited_egress_schema_cache_(limited_egress_schema_cache),
       enable_temporary_unlimited_egress_(
@@ -209,9 +205,38 @@ ProtectedAppSignalsGenerateBidsReactor::ProtectedAppSignalsGenerateBidsReactor(
                         metric::BiddingContextMap()->Remove(request_));
     if (log_context_.is_consented()) {
       metric_context_->SetConsented(raw_request_.log_context().generation_id());
+    } else if (log_context_.is_prod_debug()) {
+      metric_context_->SetConsented(kProdDebug.data());
     }
     return absl::OkStatus();
   }()) << "BiddingContextMap()->Get(request) should have been called";
+
+  if (runtime_config.use_per_request_udf_versioning) {
+    protected_app_signals_generate_bid_version_ =
+        raw_request_.blob_versions().protected_app_signals_generate_bid_udf();
+    prepare_data_for_ad_retrieval_version_ =
+        raw_request_.blob_versions().prepare_data_for_ad_retrieval_udf();
+  }
+  if (protected_app_signals_generate_bid_version_.empty()) {
+    protected_app_signals_generate_bid_version_ =
+        runtime_config.default_protected_app_signals_generate_bid_version;
+  }
+  if (prepare_data_for_ad_retrieval_version_.empty()) {
+    prepare_data_for_ad_retrieval_version_ =
+        runtime_config.default_prepare_data_for_ad_retrieval_version;
+  }
+  if (runtime_config.use_per_request_schema_versioning) {
+    egress_schema_version_ = raw_request_.blob_versions().egress_schema();
+    temporary_unlimited_egress_schema_version_ =
+        raw_request_.blob_versions().temporary_unlimited_egress_schema();
+  }
+  if (egress_schema_version_.empty()) {
+    egress_schema_version_ = runtime_config.default_egress_schema_version;
+  }
+  if (temporary_unlimited_egress_schema_version_.empty()) {
+    temporary_unlimited_egress_schema_version_ =
+        runtime_config.default_unlimited_egress_schema_version;
+  }
 }
 
 absl::Status ProtectedAppSignalsGenerateBidsReactor::ValidateRomaResponse(
@@ -343,12 +368,13 @@ ProtectedAppSignalsGenerateBidsReactor::CreateGenerateBidsRequest(
                            input);
   DispatchRequest request = {
       .id = raw_request_.log_context().generation_id(),
-      .version_string = protected_app_signals_generate_bid_version_,
+      .version_string =
+          std::string(protected_app_signals_generate_bid_version_),
       .handler_name = kDispatchHandlerFunctionNameWithCodeWrapper,
       .input = std::move(input),
       .metadata = roma_request_context_factory_.Create(),
   };
-  request.tags[kTimeoutMs] = roma_timeout_ms_;
+  request.tags[kRomaTimeoutTag] = roma_timeout_ms_;
   return request;
 }
 
@@ -376,11 +402,10 @@ ProtectedAppSignalsGenerateBidsReactor::
 
 absl::StatusOr<std::string>
 ProtectedAppSignalsGenerateBidsReactor::GetSerializedEgressPayload(
-    uint32_t schema_version, absl::string_view egress_payload,
+    absl::string_view schema_id, absl::string_view egress_payload,
     EgressSchemaCache& egress_schema_cache, int egress_bit_limit) {
   PS_VLOG(5) << "Fetching egress schema from cache";
-  PS_ASSIGN_OR_RETURN(auto egress_features,
-                      egress_schema_cache.Get(schema_version));
+  PS_ASSIGN_OR_RETURN(auto schema_data, egress_schema_cache.Get(schema_id));
   PS_VLOG(5) << "Fetched egress schema successfully from cache, retreiving "
                 "features in egress payload: "
              << egress_payload;
@@ -388,15 +413,15 @@ ProtectedAppSignalsGenerateBidsReactor::GetSerializedEgressPayload(
   PS_VLOG(5) << "Retrieved features from egress payload, setting them on the "
                 "egress features object next";
   PS_RETURN_IF_ERROR(PopulateValuesForEgressFeatures(
-      std::move(egress_values_doc.Move()), egress_features));
+      std::move(egress_values_doc.Move()), schema_data.features));
   PS_VLOG(5) << "Succeeded in setting features from egress payload to the "
                 "egress feature object, serializing the features next";
-  return SerializeEgressFeatures(schema_version, egress_features,
+  return SerializeEgressFeatures(schema_data.version, schema_data.features,
                                  egress_bit_limit);
 }
 
 void ProtectedAppSignalsGenerateBidsReactor::PopulateSerializedEgressPayload(
-    uint32_t schema_version, std::string& egress_payload_in_proto,
+    absl::string_view schema_id, std::string& egress_payload_in_proto,
     EgressSchemaCache& egress_schema_cache, int egress_bit_limit) {
   PS_VLOG(5) << "Egress payload from generateBid: " << egress_payload_in_proto;
   if (egress_payload_in_proto.empty()) {
@@ -406,7 +431,7 @@ void ProtectedAppSignalsGenerateBidsReactor::PopulateSerializedEgressPayload(
   }
 
   if (auto serialized_payload =
-          GetSerializedEgressPayload(schema_version, egress_payload_in_proto,
+          GetSerializedEgressPayload(schema_id, egress_payload_in_proto,
                                      egress_schema_cache, egress_bit_limit);
       serialized_payload.ok()) {
     PS_VLOG(5) << "Populating the serialized payload into proto";
@@ -427,8 +452,9 @@ void ProtectedAppSignalsGenerateBidsReactor::OnFetchAdsDataDone(
                            << "Ads data returned by the ad retrieval service: "
                            << result->single_partition().string_output();
   if (result->single_partition().string_output().empty()) {
-    PS_VLOG(4, log_context_) << "No ads data returned by the ad retrieval OR KV"
-                                " service, finishing RPC";
+    PS_VLOG(kNoisyInfo, log_context_)
+        << "No ads data returned by the ad retrieval OR KV"
+           " service, finishing RPC";
     EncryptResponseAndFinish(grpc::Status::OK);
     return;
   }
@@ -448,46 +474,56 @@ void ProtectedAppSignalsGenerateBidsReactor::OnFetchAdsDataDone(
         return ParseProtectedSignalsGenerateBidsResponse(response);
       },
       [this](const std::vector<ProtectedAppSignalsAdWithBid>& bids) {
+        int received_bid_count = static_cast<int>(bids.size());
+        int zero_bid_count = 0;
         for (auto& bid : bids) {
-          LogIfError(
-              metric_context_->AccumulateMetric<metric::kBiddingTotalBidsCount>(
-                  1));
           if (absl::Status validation_status =
                   IsValidProtectedAppSignalsBid(bid);
               !validation_status.ok()) {
-            LogIfError(
-                metric_context_->LogHistogram<metric::kBiddingZeroBidPercent>(
-                    1.0));
+            zero_bid_count += 1;
             PS_VLOG(kNoisyWarn, log_context_) << validation_status.message();
-          } else {
-            PS_VLOG(kNoisyInfo, log_context_)
-                << "Successful non-zero protected app signals bid received";
-            auto* added_bid = raw_response_.add_bids();
-            *added_bid = bid;
-            const int limited_egress_bits =
-                absl::GetFlag(FLAGS_limited_egress_bits);
-            if (limited_egress_bits <= 0) {
-              PS_VLOG(5) << "Allowed limited egress bits: "
-                         << limited_egress_bits << ", skipping it";
-              added_bid->clear_egress_payload();
-            } else {
-              PopulateSerializedEgressPayload(
-                  kDefaultEgressSchemaVersion,
-                  *added_bid->mutable_egress_payload(),
-                  *limited_egress_schema_cache_, limited_egress_bits);
-            }
-            if (!raw_request_.enable_unlimited_egress() ||
-                !enable_temporary_unlimited_egress_) {
-              PS_VLOG(5) << "Either request doesn't allow unlimited egress or "
-                         << "feature is disabled by the platform";
-              added_bid->clear_temporary_unlimited_egress_payload();
-            } else {
-              PopulateSerializedEgressPayload(
-                  kDefaultEgressSchemaVersion,
-                  *added_bid->mutable_temporary_unlimited_egress_payload(),
-                  *egress_schema_cache_);
-            }
+            continue;
           }
+          PS_VLOG(kNoisyInfo, log_context_)
+              << "Successful non-zero protected app signals bid received";
+          auto* added_bid = raw_response_.add_bids();
+          *added_bid = bid;
+          const int limited_egress_bits =
+              absl::GetFlag(FLAGS_limited_egress_bits);
+          if (limited_egress_bits <= 0) {
+            PS_VLOG(5) << "Allowed limited egress bits: " << limited_egress_bits
+                       << ", skipping it";
+            added_bid->clear_egress_payload();
+          } else {
+            PopulateSerializedEgressPayload(
+                egress_schema_version_, *added_bid->mutable_egress_payload(),
+                *limited_egress_schema_cache_, limited_egress_bits);
+          }
+          if (!raw_request_.enable_unlimited_egress() ||
+              !enable_temporary_unlimited_egress_) {
+            PS_VLOG(5) << "Either request doesn't allow unlimited egress or "
+                       << "feature is disabled by the platform";
+            added_bid->clear_temporary_unlimited_egress_payload();
+          } else {
+            PopulateSerializedEgressPayload(
+                temporary_unlimited_egress_schema_version_,
+                *added_bid->mutable_temporary_unlimited_egress_payload(),
+                *egress_schema_cache_);
+          }
+        }
+        LogIfError(
+            metric_context_->LogHistogram<metric::kBiddingFailedToBidPercent>(
+                0.0));
+        LogIfError(
+            metric_context_->LogHistogram<metric::kBiddingTotalBidsCount>(
+                received_bid_count));
+        if (received_bid_count > 0) {
+          LogIfError(
+              metric_context_->LogUpDownCounter<metric::kBiddingZeroBidCount>(
+                  zero_bid_count));
+          LogIfError(
+              metric_context_->LogHistogram<metric::kBiddingZeroBidPercent>(
+                  (static_cast<double>(zero_bid_count)) / received_bid_count));
         }
         EncryptResponseAndFinish(grpc::Status::OK);
       });
@@ -521,18 +557,18 @@ DispatchRequest ProtectedAppSignalsGenerateBidsReactor::
       ArgIndex(PrepareDataForRetrievalUdfArgs::kFeatureFlags), input);
   DispatchRequest request = {
       .id = raw_request_.log_context().generation_id(),
-      .version_string = ad_retrieval_version_,
+      .version_string = std::string(prepare_data_for_ad_retrieval_version_),
       .handler_name = kPrepareDataForAdRetrievalEntryFunctionName,
       .input = std::move(input),
       .metadata = roma_request_context_factory_.Create(),
   };
-  if (server_common::log::PS_VLOG_IS_ON(3)) {
+  if (server_common::log::PS_VLOG_IS_ON(kDispatch)) {
     for (const auto& i : request.input) {
       PS_VLOG(kDispatch, log_context_)
           << "Roma request input to prepared data for ads retrieval: " << *i;
     }
   }
-  request.tags[kTimeoutMs] = roma_timeout_ms_;
+  request.tags[kRomaTimeoutTag] = roma_timeout_ms_;
   return request;
 }
 
@@ -646,12 +682,17 @@ void ProtectedAppSignalsGenerateBidsReactor::Execute() {
   }
 
   PS_VLOG(8, log_context_) << __func__;
-  PS_VLOG(kEncrypted, log_context_)
-      << "GenerateBidsRequest exported in EventMessage";
-  log_context_.SetEventMessageField(*request_);
-  PS_VLOG(kPlain, log_context_)
-      << "GenerateBidsRawRequest exported in EventMessage";
-  log_context_.SetEventMessageField(raw_request_);
+
+  if (server_common::log::PS_VLOG_IS_ON(kPlain)) {
+    if (server_common::log::PS_VLOG_IS_ON(kEncrypted)) {
+      PS_VLOG(kEncrypted, log_context_)
+          << "GenerateBidsRequest exported in EventMessage if consented";
+      log_context_.SetEventMessageField(*request_);
+    }
+    PS_VLOG(kPlain, log_context_)
+        << "GenerateBidsRawRequest exported in EventMessage if consented";
+    log_context_.SetEventMessageField(raw_request_);
+  }
 
   if (IsContextualRetrievalRequest()) {
     StartContextualAdsRetrieval();
@@ -670,11 +711,16 @@ void ProtectedAppSignalsGenerateBidsReactor::OnDone() { delete this; }
 void ProtectedAppSignalsGenerateBidsReactor::EncryptResponseAndFinish(
     grpc::Status status) {
   PS_VLOG(8, log_context_) << __func__;
-  PS_VLOG(kPlain, log_context_)
-      << "GenerateProtectedAppSignalsBidsRawResponse exported in EventMessage";
-  log_context_.SetEventMessageField(raw_response_);
+  raw_response_.set_bidding_export_debug(log_context_.ShouldExportEvent());
+  if (server_common::log::PS_VLOG_IS_ON(kPlain)) {
+    PS_VLOG(kPlain, log_context_)
+        << "GenerateProtectedAppSignalsBidsRawResponse "
+           "exported in EventMessage if consented";
+    log_context_.SetEventMessageField(raw_response_);
+  }
   // ExportEventMessage before encrypt response
-  log_context_.ExportEventMessage(/*if_export_consented=*/true);
+  log_context_.ExportEventMessage(/*if_export_consented=*/true,
+                                  log_context_.ShouldExportEvent());
   if (!EncryptResponse()) {
     PS_LOG(ERROR, log_context_)
         << "Failed to encrypt the generate app signals bids response.";

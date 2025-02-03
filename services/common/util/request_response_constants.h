@@ -20,6 +20,7 @@
 #include <stddef.h>
 
 #include <array>
+#include <cstdint>
 #include <string>
 
 #include "absl/strings/string_view.h"
@@ -32,6 +33,9 @@ namespace privacy_sandbox::bidding_auction_servers {
 using UpdateGroupMap =
     ::google::protobuf::Map<std::string, UpdateInterestGroupList>;
 
+using AdtechOriginDebugUrlsMap =
+    ::google::protobuf::Map<std::string, DebugReports>;
+
 // Maximum number of keys in the incoming ProtectedAuctionInput request.
 inline constexpr int kNumRequestRootKeys = 8;
 
@@ -41,7 +45,7 @@ inline constexpr int kNumConsentedDebugConfigKeys = 3;
 
 // Maximum number of keys that will be populated in the encoded CBOR
 // AuctionResult response.
-inline constexpr int kNumAuctionResultKeys = 18;
+inline constexpr int kNumAuctionResultKeys = 21;
 
 // Maximum number of keys that will be populated in the encoded CBOR
 // WinReportingUrls response.
@@ -51,13 +55,20 @@ inline constexpr int kNumWinReportingUrlsKeys = 3;
 // ReportingUrls response.
 inline constexpr int kNumReportingUrlsKeys = 2;
 
+// Maximum number of keys in each DebugReport.
+inline constexpr int kNumDebugReportKeys = 4;
+
+// Maximum number of keys that will be populated in the encoded CBOR
+// DebugReports response.
+inline constexpr int kNumDebugReportsKeys = 2;
+
 // Maximum number of keys that will be populated in the encoded CBOR
 // KAnonJoinCandidate response.
 inline constexpr int kNumKAnonJoinCandidateKeys = 3;
 
 // Maximum number of keys that will be populated in the encoded CBOR
 // KAnonGhostWinner response.
-inline constexpr int kNumKAnonGhostWinnerKeys = 5;
+inline constexpr int kNumKAnonGhostWinnerKeys = 6;
 
 // Maximum number of keys that will be populated in the encoded CBOR
 // GhostWinnerForTopLevelAuction response.
@@ -69,6 +80,19 @@ inline constexpr int kNumGhostWinnerPrivateAggregationSignalsKeys = 2;
 
 // Minimum size of the returned response in bytes.
 inline constexpr size_t kMinAuctionResultBytes = 512;
+
+// Maximum size of keys in the each Private Aggregation contribution.
+inline constexpr int kNumContributionKeys = 2;
+
+// Maximum size of keys in the each Private Aggregation event contribution.
+inline constexpr int kNumEventContributionKeys = 2;
+
+// Maximum size of keys in the each Private Aggregation ig contribution.
+inline constexpr int kNumIgContributionKeys = 2;
+inline constexpr int kNumIgContributionKeysWithoutIgIdx = 1;
+
+// Maximum size of keys in the each paggResponse.
+inline constexpr int kNumPAggResponseKeys = 2;
 
 // Constants for the fields in the request payload.
 inline constexpr char kVersion[] = "version";
@@ -104,11 +128,14 @@ inline constexpr char kUpdateIfOlderThanMs[] = "updateIfOlderThanMs";
 
 // Constants for the fields in response sent back to clients.
 inline constexpr char kBid[] = "bid";                              // length: 3
+inline constexpr char kAdAuctionResultNonce[] = "nonce";           // length: 5
 inline constexpr char kScore[] = "score";                          // length: 5
 inline constexpr char kChaff[] = "isChaff";                        // length: 7
 inline constexpr char kAdMetadata[] = "adMetadata";                // length: 10
 inline constexpr char kAdRenderUrl[] = "adRenderURL";              // length: 11
 inline constexpr char kBidCurrency[] = "bidCurrency";              // length: 11
+inline constexpr char kDebugReports[] = "debugReports";            // length: 12
+inline constexpr char kPAggResponse[] = "paggResponse";            // length: 12
 inline constexpr char kUpdateGroups[] = "updateGroups";            // length: 12
 inline constexpr char kBiddingGroups[] = "biddingGroups";          // length: 13
 inline constexpr char kTopLevelSeller[] = "topLevelSeller";        // length: 14
@@ -123,6 +150,17 @@ inline constexpr char kKAnonWinnerJoinCandidates[] =
 inline constexpr char kKAnonWinnerPositionalIndex[] =
     "kAnonWinnerPositionalIndex";  // length: 26
 
+// Constants for subfields returned in debugReports response object in
+// AuctionResult.
+inline constexpr char kReports[] = "reports";            // length: 7
+inline constexpr char kAdTechOrigin[] = "adTechOrigin";  // length: 12
+
+// Constants for subfields returned in debugReport in debugReports.
+inline constexpr char kUrl[] = "url";                        // length: 3
+inline constexpr char kIsWinReport[] = "isWinReport";        // length: 11
+inline constexpr char kComponentWin[] = "componentWin";      // length: 12
+inline constexpr char kIsSellerReport[] = "isSellerReport";  // length: 14
+
 // Constants for subfields returned in KAnonJoinCandidate (or
 // k_anon_winner_join_candidates) response object in AuctionResult.
 inline constexpr char kAdRenderUrlHash[] = "adRenderURLHash";  // length: 15
@@ -133,8 +171,9 @@ inline constexpr char kAdComponentRenderUrlsHash[] =
 // Constants for subfields returned in kAnonGhostWinners response object in
 // AuctionResult.
 inline constexpr char kOwner[] = "owner";  // length: 5
+// kInterestGroupName is defined previously.
 inline constexpr char kInterestGroupIndex[] =
-    "interestGroupIndex";  // length: 19
+    "interestGroupIndex";  // length: 18
 inline constexpr char kKAnonJoinCandidates[] =
     "kAnonJoinCandidates";  // length: 19
 inline constexpr char kGhostWinnerForTopLevelAuction[] =
@@ -153,13 +192,25 @@ inline constexpr char kAdComponentRenderUrls[] =
     "adComponentRenderURLs";  // length: 21
 inline constexpr char kBuyerAndSellerReportingId[] =
     "buyerAndSellerReportingId";  // length: 25
-inline constexpr char kSelectableBuyerAndSellerReportingId[] =
-    "selectableBuyerAndSellerReportingId";  // length: 35
+inline constexpr char kSelectedBuyerAndSellerReportingId[] =
+    "selectedBuyerAndSellerReportingId";  // length: 33
 
-// Constants for subfields returned in ghostWinnerPrivateAggregationSignals
-// (under kAnonGhostWinners) in AuctionResult.
+// Constants for subfields returned in contributions in AuctionResult.
 inline constexpr char kValue[] = "value";    // length: 5
 inline constexpr char kBucket[] = "bucket";  // length: 6
+
+// Constants for subfields returned in event contributions in AuctionResult.
+inline constexpr char kEvent[] = "event";                  // length: 5
+inline constexpr char kContributions[] = "contributions";  // length: 13
+
+// Constants for subfields returned in igContributions
+inline constexpr char kIgIndex[] = "igIndex";  // length: 7
+inline constexpr char kEventContributions[] =
+    "eventContributions";  // length: 18
+
+// Constants for subfields returned in paggResponse
+inline constexpr char kIgContributions[] = "igContributions";  // length: 15
+inline constexpr char kReportingOrigin[] = "reportingOrigin";  // length: 15
 
 inline constexpr std::array<absl::string_view, kNumRequestRootKeys>
     kRequestRootKeys = {kVersion,
@@ -186,7 +237,29 @@ inline constexpr std::array<absl::string_view, kNumConsentedDebugConfigKeys>
         kIsDebugResponse,
 };
 
-inline constexpr char kTimeoutMs[] = "TimeoutMs";
+inline constexpr std::array<absl::string_view, kNumContributionKeys>
+    kPaggContributionKeys = {
+        kValue,
+        kBucket,
+};
+
+inline constexpr std::array<absl::string_view, kNumEventContributionKeys>
+    kPaggEventContributionKeys = {
+        kEvent,
+        kContributions,
+};
+
+inline constexpr std::array<absl::string_view, kNumIgContributionKeys>
+    kPaggIgContributionKeys = {
+        kIgIndex,
+        kEventContributions,
+};
+
+inline constexpr std::array<absl::string_view, kNumPAggResponseKeys>
+    kPaggResponseKeys = {
+        kIgContributions,
+        kReportingOrigin,
+};
 
 inline constexpr int kNumErrorKeys = 2;
 inline constexpr char kError[] = "error";
@@ -213,11 +286,18 @@ inline constexpr std::array<absl::string_view, kNumWinReportingUrlsKeys>
                          kTopLevelSellerReportingUrls};
 inline constexpr std::array<absl::string_view, kNumReportingUrlsKeys>
     kReportingKeys = {kReportingUrl, kInteractionReportingUrls};
+inline constexpr std::array<absl::string_view, kNumDebugReportKeys>
+    kDebugReportKeys = {kUrl, kIsWinReport, kComponentWin, kIsSellerReport};
+inline constexpr std::array<absl::string_view, kNumDebugReportsKeys>
+    kDebugReportsKeys = {kReports, kAdTechOrigin};
 inline constexpr std::array<absl::string_view, kNumKAnonJoinCandidateKeys>
     kKAnonJoinCandidateKeys = {kAdRenderUrlHash, kAdComponentRenderUrlsHash,
                                kReportingIdHash};
 inline constexpr std::array<absl::string_view, kNumKAnonGhostWinnerKeys>
-    kKAnonGhostWinnerKeys = {kKAnonJoinCandidates, kInterestGroupIndex, kOwner,
+    kKAnonGhostWinnerKeys = {kKAnonJoinCandidates,
+                             kInterestGroupIndex,
+                             kOwner,
+                             kInterestGroupName,
                              kGhostWinnerPrivateAggregationSignals,
                              kGhostWinnerForTopLevelAuction};
 inline constexpr std::array<absl::string_view,
@@ -229,9 +309,12 @@ inline constexpr std::array<absl::string_view,
         kAdRenderUrl,      kAdComponentRenderUrls,
         kModifiedBid,      kBidCurrency,
         kAdMetadata,       kBuyerAndSellerReportingId,
-        kBuyerReportingId, kSelectableBuyerAndSellerReportingId};
+        kBuyerReportingId, kSelectedBuyerAndSellerReportingId};
 
-enum class AuctionType : int { kProtectedAudience, kProtectedAppSignals };
+enum class AuctionType : std::uint8_t {
+  kProtectedAudience,
+  kProtectedAppSignals
+};
 
 }  // namespace privacy_sandbox::bidding_auction_servers
 

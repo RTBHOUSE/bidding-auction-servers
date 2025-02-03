@@ -42,8 +42,12 @@ cc_library(
         "multi_curl_http_fetcher_async.h",
     ],
     deps = [
+        "//services/common/constants:common_service_flags",
         "//services/common/loggers:request_log_context",
+        "//services/common/util:event",
+        "//services/common/util:event_base",
         "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/flags:flag",
         "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
@@ -58,6 +62,9 @@ cc_test(
     name = "multi_curl_http_fetcher_async_test",
     size = "medium",
     srcs = ["multi_curl_http_fetcher_async_test.cc"],
+    data = [
+        "//services/common:roots_pem",
+    ],
     tags = [
         "flaky",
         "requires-network",

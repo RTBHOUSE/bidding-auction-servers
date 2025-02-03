@@ -69,6 +69,7 @@ cc_test(
         "//services/common/clients/async_grpc:default_raw_async_grpc_client_integration_test_utils",
         "//services/common/constants:common_service_flags",
         "//services/common/encryption:key_fetcher_factory",
+        "//services/common/test:constants",
         "//services/common/test:mocks",
         "//services/common/test:random",
         "//services/common/test/utils:test_init",
@@ -76,5 +77,33 @@ cc_test(
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
         "@google_privacysandbox_servers_common//src/encryption/key_fetcher:key_fetcher_manager",
+    ],
+)
+
+cc_library(
+    name = "kv_v2",
+    srcs = ["kv_v2.cc"],
+    hdrs = ["kv_v2.h"],
+    deps = [
+        "//api:bidding_auction_servers_cc_proto",
+        "//services/common/util:json_util",
+        "@com_google_absl//absl/status",
+        "@google_privacysandbox_servers_common//src/logger:request_context_logger",
+        "@google_privacysandbox_servers_common//src/util/status_macro:status_macros",
+        "@rapidjson",
+        "@service_value_key_fledge_privacysandbox//public/query/v2:get_values_v2_cc_proto",
+    ],
+)
+
+cc_test(
+    name = "kv_v2_test",
+    size = "small",
+    srcs = [
+        "kv_v2_test.cc",
+    ],
+    deps = [
+        ":kv_v2",
+        "//services/common/test/utils:test_utils",
+        "@com_google_googletest//:gtest_main",
     ],
 )

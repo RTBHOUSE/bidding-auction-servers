@@ -24,7 +24,9 @@
 
 #include "absl/status/statusor.h"
 #include "include/grpcpp/impl/codegen/server_callback.h"
+#include "services/seller_frontend_service/report_win_map.h"
 #include "services/seller_frontend_service/select_ad_reactor.h"
+#include "services/seller_frontend_service/util/web_utils.h"
 
 namespace privacy_sandbox::bidding_auction_servers {
 
@@ -34,7 +36,9 @@ class SelectAdReactorForWeb : public SelectAdReactor {
       grpc::CallbackServerContext* context, const SelectAdRequest* request,
       SelectAdResponse* response, const ClientRegistry& clients,
       const TrustedServersConfigClient& config_client,
-      bool enable_cancellation = false, bool enable_kanon = false,
+      const ReportWinMap& report_win_map, bool enable_cancellation = false,
+      bool enable_kanon = false,
+      bool enable_buyer_private_aggregate_reporting = false,
       bool fail_fast = true, int max_buyers_solicited = 2);
   virtual ~SelectAdReactorForWeb() = default;
 
@@ -45,7 +49,8 @@ class SelectAdReactorForWeb : public SelectAdReactor {
  protected:
   absl::StatusOr<std::string> GetNonEncryptedResponse(
       const std::optional<ScoreAdsResponse::AdScore>& high_score,
-      const std::optional<AuctionResult::Error>& error) override;
+      const std::optional<AuctionResult::Error>& error,
+      const AdScores* ghost_winning_scores = nullptr) override;
 
   [[deprecated]] ProtectedAudienceInput GetDecodedProtectedAudienceInput(
       absl::string_view encoded_data) override;
@@ -56,6 +61,11 @@ class SelectAdReactorForWeb : public SelectAdReactor {
   absl::flat_hash_map<absl::string_view, BuyerInput> GetDecodedBuyerinputs(
       const google::protobuf::Map<std::string, std::string>&
           encoded_buyer_inputs) override;
+
+  KAnonJoinCandidate GetKAnonJoinCandidate(
+      const ScoreAdsResponse::AdScore& score) override;
+
+  absl::string_view GetKAnonSetType() override;
 };
 
 }  // namespace privacy_sandbox::bidding_auction_servers

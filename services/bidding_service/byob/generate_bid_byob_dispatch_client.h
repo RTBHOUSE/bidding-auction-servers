@@ -35,7 +35,11 @@ class GenerateBidByobDispatchClient
  public:
   // Required for moving an instance (for eg. inside a factory function).
   GenerateBidByobDispatchClient(GenerateBidByobDispatchClient&& other) noexcept
-      : byob_service_(std::move(other.byob_service_)) {}
+      : byob_service_(std::move(other.byob_service_)),
+        num_workers_(other.num_workers_) {}
+
+  // Deleted copy constructor
+  GenerateBidByobDispatchClient(const GenerateBidByobDispatchClient&) = delete;
 
   ~GenerateBidByobDispatchClient() override = default;
 
@@ -54,15 +58,21 @@ class GenerateBidByobDispatchClient
   // return: a status indicating whether the code load was successful.
   absl::Status LoadSync(std::string version, std::string code) override;
 
-  // Executes a single request synchronously.
+  // Executes a single request asynchronously.
   //
   // request: the request object.
   // timeout: the maximum time this will block for.
-  // return: the output of the execution.
-  absl::StatusOr<
-      std::unique_ptr<roma_service::GenerateProtectedAudienceBidResponse>>
-  Execute(const roma_service::GenerateProtectedAudienceBidRequest& request,
-          absl::Duration timeout) override;
+  // callback: called with the output of execution.
+  // return: a status indicating if the execution request was properly
+  //         processed by the implementing class. This should not be confused
+  //         with the output of the execution itself, which is sent to callback.
+  absl::Status Execute(
+      roma_service::GenerateProtectedAudienceBidRequest request,
+      absl::Duration timeout,
+      absl::AnyInvocable<
+          void(absl::StatusOr<
+               roma_service::GenerateProtectedAudienceBidResponse>) &&>
+          callback) override;
 
  private:
   // ROMA BYOB service that encapsulates the AdTech UDF interface.
@@ -72,7 +82,7 @@ class GenerateBidByobDispatchClient
   std::string code_token_;
 
   // AdTech code version corresponding to the most recently loaded code blob.
-  std::string code_version_;
+  std::string code_version_ ABSL_GUARDED_BY(code_mutex_);
 
   // Hash of the most recently loaded code blob. Used to prevent loading the
   // same code multiple times.
@@ -81,9 +91,13 @@ class GenerateBidByobDispatchClient
   // Mutex to protect information about the most recently loaded code blob.
   absl::Mutex code_mutex_;
 
+  // Number of UDF workers.
+  int num_workers_;
+
   explicit GenerateBidByobDispatchClient(
-      roma_service::ByobGenerateProtectedAudienceBidService<> byob_service)
-      : byob_service_(std::move(byob_service)) {}
+      roma_service::ByobGenerateProtectedAudienceBidService<> byob_service,
+      int num_workers)
+      : byob_service_(std::move(byob_service)), num_workers_(num_workers) {}
 };
 
 }  // namespace privacy_sandbox::bidding_auction_servers

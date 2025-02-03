@@ -29,6 +29,8 @@
 #include "absl/synchronization/notification.h"
 #include "services/common/clients/http/http_fetcher_async.h"
 #include "services/common/clients/http/multi_curl_request_manager.h"
+#include "services/common/util/event.h"
+#include "services/common/util/event_base.h"
 #include "src/concurrent/event_engine_executor.h"
 
 namespace privacy_sandbox::bidding_auction_servers {
@@ -39,46 +41,6 @@ struct DataToUpload {
   std::string data;
   // First offset in the data that has not yet been uploaded.
   int offset = 0;
-};
-
-// Libevent uses default priority as half of the number of priorities.
-// We needed 2 priorities to begin with (high and default) but configured 3
-// here for future use if we have to configure a low priority event.
-inline constexpr int kNumEventPriorities = 3;
-
-// Wrapper for the libevent structure to hold information and state for a
-// libevent dispatch loop.
-class EventBase {
- public:
-  explicit EventBase(int num_priorities = kNumEventPriorities);
-  virtual ~EventBase();
-
-  // Gets the underlying event base data type.
-  struct event_base* get();
-
- private:
-  struct event_base* event_base_ = nullptr;
-};
-
-// Arguments are documented here:
-// https://libevent.org/doc/event_8h.html#aed2307f3d9b38e07cc10c2607322d758
-using EventCallback = void (*)(/*fd or signal=*/int, /*events=*/short,
-                               /*pointer to user provided data=*/void*);
-
-// Wraps the event used by libevent. This wrapper makes it easier to manage
-// lifecycle of the underlying event.
-class Event {
- public:
-  explicit Event(struct event_base* base, evutil_socket_t fd, short event_type,
-                 EventCallback event_callback, void* arg,
-                 int priority = kNumEventPriorities / 2,
-                 struct timeval* event_timeout = nullptr);
-  struct event* get();
-  virtual ~Event();
-
- private:
-  int priority_;
-  struct event* event_ = nullptr;
 };
 
 // MultiCurlHttpFetcherAsync provides a thread-safe libcurl wrapper to perform
@@ -102,7 +64,8 @@ class MultiCurlHttpFetcherAsync final : public HttpFetcherAsync {
   // probe after keepalive_interval_sec.
   explicit MultiCurlHttpFetcherAsync(server_common::Executor* executor,
                                      int64_t keepalive_interval_sec = 2,
-                                     int64_t keepalive_idle_sec = 2);
+                                     int64_t keepalive_idle_sec = 2,
+                                     std::string ca_cert = "/etc/roots.pem");
 
   // Cleans up all sessions and errors out any pending open HTTP calls.
   // Please note: Any class using this must ensure that the instance is only
@@ -298,6 +261,8 @@ class MultiCurlHttpFetcherAsync final : public HttpFetcherAsync {
   // Interval time between keep-alive probes in case of no response.
   int64_t keepalive_interval_sec_;
 
+  bool skip_tls_verification_;
+
   // All events in the loop are associated with this event base. Note: There can
   // be a single event base for a single thread.
   // Documentation: https://libevent.org/libevent-book/Ref2_eventbase.html
@@ -310,6 +275,9 @@ class MultiCurlHttpFetcherAsync final : public HttpFetcherAsync {
   // The multi session used for performing HTTP calls.
   MultiCurlRequestManager multi_curl_request_manager_;
   Event multi_timer_event_;  // Controlled by multi libcurl stack.
+
+  // Path to CA cert roots.pem
+  std::string ca_cert_;
 
   // Makes sure only one execution loop runs at a time.
   absl::Mutex in_loop_mu_;

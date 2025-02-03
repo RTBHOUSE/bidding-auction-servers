@@ -54,6 +54,13 @@ absl::flat_hash_map<std::string, std::string> MakeARandomMap(int entries = 2);
 
 int MakeARandomInt(int min, int max);
 
+template <typename NumType>
+std::string FormatNumber(NumType num, int precision = 1) {
+  std::ostringstream oss;
+  oss << std::fixed << std::setprecision(precision) << num;
+  return oss.str();
+}
+
 template <typename num_type>
 num_type MakeARandomNumber(num_type min, num_type max) {
   std::default_random_engine curr_time_generator(ToUnixMillis(absl::Now()));
@@ -132,7 +139,8 @@ InterestGroupForBidding MakeARandomInterestGroupForBiddingFromBrowser();
 
 GenerateBidsRequest::GenerateBidsRawRequest
 MakeARandomGenerateBidsRawRequestForAndroid(
-    bool enforce_kanon = false, int multi_bid_limit = kDefaultMultiBidLimit);
+    bool enforce_kanon = false, int multi_bid_limit = kDefaultMultiBidLimit,
+    int num_igs = 2);
 
 GenerateBidsRequest::GenerateBidsRawRequest
 MakeARandomGenerateBidsRequestForBrowser(
@@ -189,7 +197,8 @@ GetBidsRequest::GetBidsRawRequest MakeARandomGetBidsRawRequest();
 GetBidsRequest MakeARandomGetBidsRequest();
 
 template <typename T>
-T MakeARandomProtectedAuctionInput(int num_buyers = 2) {
+T MakeARandomProtectedAuctionInput(int num_buyers = 2,
+                                   bool enable_debug_reporting = true) {
   google::protobuf::Map<std::string, BuyerInput> buyer_inputs;
   for (int i = 0; i < num_buyers; i++) {
     BuyerInput buyer_input;
@@ -205,7 +214,7 @@ T MakeARandomProtectedAuctionInput(int num_buyers = 2) {
   *protected_auction_input.mutable_buyer_input() =
       *std::move(encoded_buyer_input);
   protected_auction_input.set_publisher_name(MakeARandomString());
-  protected_auction_input.set_enable_debug_reporting(true);
+  protected_auction_input.set_enable_debug_reporting(enable_debug_reporting);
   return protected_auction_input;
 }
 
@@ -236,6 +245,14 @@ SelectAdRequest MakeARandomSelectAdRequest(
         buyer_input_pair.first;
     SelectAdRequest::AuctionConfig::PerBuyerConfig per_buyer_config = {};
     per_buyer_config.set_buyer_signals(MakeARandomString());
+    BuyerBlobVersions& blob_versions =
+        *(per_buyer_config.mutable_blob_versions());
+    blob_versions.set_protected_audience_generate_bid_udf("test/pa");
+    blob_versions.set_protected_app_signals_generate_bid_udf("test/pas");
+    blob_versions.set_prepare_data_for_ad_retrieval_udf("test/ad_retrieval");
+    blob_versions.set_egress_schema("test/egress_schema");
+    blob_versions.set_temporary_unlimited_egress_schema(
+        "test/unlimited_egress_schema");
     if (set_buyer_egid) {
       per_buyer_config.set_buyer_kv_experiment_group_id(
           MakeARandomInt(1000, 10000));
