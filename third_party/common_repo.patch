@@ -1,0 +1,107 @@
+diff --git a/src/roma/byob/container/BUILD.bazel b/src/roma/byob/container/BUILD.bazel
+index e76f7c94..ae145a7f 100644
+--- a/src/roma/byob/container/BUILD.bazel
++++ b/src/roma/byob/container/BUILD.bazel
+@@ -223,7 +265,7 @@ if [[ -d $${{ROOT_DIR}}/lib64 ]]; then
+   rm -rf "$${{ROOT_DIR}}/lib"
+ fi
+ # TODO: b/330312036 - Avoid compressing this tar till rules_docker is deprecated.
+-tar --create --owner={user}:{uid} --group={group}:{gid} --file=$@ --directory="$${{TMPDIR}}" "{roma_container_dir}/"
++tar --create --owner={user}:{uid} --group={group}:{gid} --sort=name --format=gnu --mtime="2000-01-01 10:00:00" --file=$@ --directory="$${{TMPDIR}}" "{roma_container_dir}/"
+ rm -rf "$${{TMPDIR}}"
+ """.format(
+             flavor = user.flavor,
+
+diff --git a/src/core/curl_client/http1_curl_wrapper.cc b/src/core/curl_client/http1_curl_wrapper.cc
+index ecd7aed5..ffbefabb 100644
+--- a/src/core/curl_client/http1_curl_wrapper.cc
++++ b/src/core/curl_client/http1_curl_wrapper.cc
+@@ -111,12 +111,20 @@ size_t ResponsePayloadHandler(char* contents, size_t byte_size,
+                               size_t num_bytes, void* output) {
+   BytesBuffer* output_buffer = static_cast<BytesBuffer*>(output);
+   size_t contents_length = byte_size * num_bytes;
+-  output_buffer->bytes = std::make_shared<std::vector<Byte>>(contents_length);
+-  for (size_t i = 0; i < contents_length; i++) {
+-    output_buffer->bytes->at(i) = contents[i];
++
++  if (!output_buffer->bytes) {
++    output_buffer->bytes = std::make_shared<std::vector<Byte>>();
+   }
+-  output_buffer->length = contents_length;
+-  output_buffer->capacity = contents_length;
++
++  size_t current_size = output_buffer->bytes->size();
++  output_buffer->bytes->resize(current_size + contents_length);
++
++  std::memcpy(output_buffer->bytes->data() + current_size, contents,
++              contents_length);
++
++  output_buffer->length += contents_length;
++  output_buffer->capacity = output_buffer->bytes->capacity();
++
+   return contents_length;
+ }
+
+diff --git a/src/core/curl_client/http1_curl_wrapper_test.cc b/src/core/curl_client/http1_curl_wrapper_test.cc
+index 37a3e976..85191410 100644
+--- a/src/core/curl_client/http1_curl_wrapper_test.cc
++++ b/src/core/curl_client/http1_curl_wrapper_test.cc
+@@ -40,13 +40,12 @@ namespace {
+ // place null characters at the end, except when c_str is called. However, I
+ // confirmed printing behaves nicely.
+ constexpr Byte kRequestBody[] = {'a', 'b', '\0', 'c'};
+-constexpr Byte kResponseBody[] = {'\0', 'd', 'e', 'f'};
+
+ class Http1CurlWrapperTest
+     : public ::testing::TestWithParam<std::tuple<status, ExecutionResult>> {
+  protected:
+   Http1CurlWrapperTest()
+-      : response_body_(kResponseBody, sizeof(kResponseBody)),
++      : response_body_(std::string(100000, '*')),
+         post_request_body_(kRequestBody, sizeof(kRequestBody)),
+         subject_([]() {
+           auto wrapper_or = Http1CurlWrapper::MakeWrapper();
+diff --git a/src/cpio/client_providers/auth_token_provider/gcp/gcp_auth_token_provider.cc b/src/cpio/client_providers/auth_token_provider/gcp/gcp_auth_token_provider.cc
+index 58a239d2..e06a2633 100644
+--- a/src/cpio/client_providers/auth_token_provider/gcp/gcp_auth_token_provider.cc
++++ b/src/cpio/client_providers/auth_token_provider/gcp/gcp_auth_token_provider.cc
+@@ -251,6 +251,7 @@ void GcpAuthTokenProvider::OnGetSessionTokenForTargetAudienceCallback(
+     SCP_ERROR_CONTEXT(kGcpAuthTokenProvider, get_token_context, result,
+                       "Received token does not have %d parts.",
+                       kExpectedTokenPartsSize);
++    fprintf(stderr, "%s\n", response_body.c_str());
+     get_token_context.Finish(result);
+     return;
+   }
+@@ -262,6 +263,7 @@ void GcpAuthTokenProvider::OnGetSessionTokenForTargetAudienceCallback(
+     SCP_ERROR_CONTEXT(kGcpAuthTokenProvider, get_token_context,
+                       padded_jwt_or.result(),
+                       "Received JWT cannot be padded correctly.");
++    fprintf(stderr, "%s\n", response_body.c_str());
+     get_token_context.Finish(padded_jwt_or.result());
+     return;
+   }
+@@ -270,6 +272,7 @@ void GcpAuthTokenProvider::OnGetSessionTokenForTargetAudienceCallback(
+       !decode_result.Successful()) {
+     SCP_ERROR_CONTEXT(kGcpAuthTokenProvider, get_token_context, decode_result,
+                       "Received token JWT could not be decoded.");
++    fprintf(stderr, "%s\n", response_body.c_str());
+     get_token_context.Finish(decode_result);
+     return;
+   }
+@@ -282,6 +285,7 @@ void GcpAuthTokenProvider::OnGetSessionTokenForTargetAudienceCallback(
+         SC_GCP_INSTANCE_AUTHORIZER_PROVIDER_BAD_SESSION_TOKEN);
+     SCP_ERROR_CONTEXT(kGcpAuthTokenProvider, get_token_context, result,
+                       "Received JWT could not be parsed into a JSON.");
++    fprintf(stderr, "%s\n", response_body.c_str());
+     get_token_context.Finish(result);
+     return;
+   }
+@@ -296,6 +300,7 @@ void GcpAuthTokenProvider::OnGetSessionTokenForTargetAudienceCallback(
+     SCP_ERROR_CONTEXT(
+         kGcpAuthTokenProvider, get_token_context, result,
+         "Received JWT does not contain all the necessary fields.");
++    fprintf(stderr, "%s\n", response_body.c_str());
+     get_token_context.Finish(result);
+     return;
+   }

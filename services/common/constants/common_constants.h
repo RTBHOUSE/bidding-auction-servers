@@ -26,6 +26,16 @@ namespace privacy_sandbox::bidding_auction_servers {
 inline constexpr absl::string_view kIgnoredPlaceholderValue = "PLACEHOLDER";
 inline constexpr absl::string_view kBiddingAuctionCompressionHeader =
     "bidding-auction-compression-type";
+inline constexpr absl::string_view kSignalsNotFetched = "NOT_FETCHED";
+inline constexpr absl::string_view kSignalsFetchedButOptional =
+    "FETCHED_BUT_OPTIONAL";
+inline constexpr absl::string_view kSignalsRequired = "REQUIRED";
+inline constexpr char kDataVersion[] = "dataVersion";
+inline constexpr char kKvRenderUrls[] = "renderUrls";
+inline constexpr char kKvAdComponentRenderUrls[] = "adComponentRenderUrls";
+inline constexpr char kKvExperimentGroupId[] = "experiment_group_id";
+// TODO(b/379335128): Change to "TimeoutDuration" and verify no perf regression.
+inline constexpr char kRomaTimeoutTag[] = "IGNORED";
 
 }  // namespace privacy_sandbox::bidding_auction_servers
 

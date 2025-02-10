@@ -26,7 +26,8 @@ namespace privacy_sandbox::bidding_auction_servers {
 // Builds Seller KV Value lookup https request url.
 HTTPRequest SellerKeyValueAsyncHttpClient::BuildSellerKeyValueRequest(
     absl::string_view kv_server_host_domain, const RequestMetadata& metadata,
-    std::unique_ptr<GetSellerValuesInput> client_input) {
+    std::unique_ptr<GetSellerValuesInput> client_input,
+    std::vector<std::string> expected_response_headers_to_include) {
   HTTPRequest request;
   ClearAndMakeStartOfUrl(kv_server_host_domain, &request.url);
 
@@ -54,6 +55,7 @@ HTTPRequest SellerKeyValueAsyncHttpClient::BuildSellerKeyValueRequest(
                                    true);
   }
   request.headers = RequestMetadataToHttpHeaders(metadata);
+  request.include_headers = std::move(expected_response_headers_to_include);
   return request;
 }
 
@@ -63,8 +65,9 @@ absl::Status SellerKeyValueAsyncHttpClient::Execute(
         void(absl::StatusOr<std::unique_ptr<GetSellerValuesOutput>>) &&>
         on_done,
     absl::Duration timeout, RequestContext context) const {
-  HTTPRequest request = BuildSellerKeyValueRequest(kv_server_base_address_,
-                                                   metadata, std::move(keys));
+  HTTPRequest request = BuildSellerKeyValueRequest(
+      kv_server_base_address_, metadata, std::move(keys),
+      {kDataVersionResponseHeaderName});
   PS_VLOG(kKVLog, context.log)
       << "SellerKeyValueAsyncHttpClient Request: " << request.url;
   PS_VLOG(kKVLog, context.log) << "\nSellerKeyValueAsyncHttpClient Headers:\n";
@@ -89,28 +92,51 @@ absl::Status SellerKeyValueAsyncHttpClient::Execute(
   }();
   auto done_callback = [on_done = std::move(on_done), request_size,
                         score_signal = std::move(score_signal), context](
-                           absl::StatusOr<std::string> resultStr) mutable {
-    if (resultStr.ok()) {
-      PS_VLOG(kKVLog, context.log)
-          << "SellerKeyValueAsyncHttpClient response exported in EventMessage";
-      if (AllowAnyEventLogging(context.log)) {
-        score_signal.set_response(resultStr.value());
-        context.log.SetEventMessageField(std::move(score_signal));
+                           absl::StatusOr<HTTPResponse> httpResponse) mutable {
+    if (httpResponse.ok()) {
+      if (server_common::log::PS_VLOG_IS_ON(kKVLog)) {
+        PS_VLOG(kKVLog, context.log)
+            << "SellerKeyValueAsyncHttpClient response exported in "
+               "EventMessage if consented";
+        if (AllowAnyEventLogging(context.log)) {
+          score_signal.set_response(httpResponse->body);
+          context.log.SetEventMessageField(std::move(score_signal));
+        }
       }
-      size_t response_size = resultStr->size();
+      size_t response_size = httpResponse->body.size();
+      uint32_t data_version_value = 0;
+      if (auto dv_header_it =
+              httpResponse->headers.find(kDataVersionResponseHeaderName);
+          dv_header_it != httpResponse->headers.end()) {
+        if (const absl::StatusOr<std::string>& dv = dv_header_it->second;
+            dv.ok()) {
+          if (!absl::SimpleAtoi(*dv, &data_version_value)) {
+            // Out param will be "left in an unspecified state" if parsing
+            // fails, so reset to 0.
+            data_version_value = 0;
+            PS_VLOG(kNoisyWarn, context.log)
+                << "SellerKeyValueAsyncHttpClient received a non-int, "
+                   "negative, "
+                   "or too-large data version header.";
+          }
+        }
+      }
       std::unique_ptr<GetSellerValuesOutput> resultUPtr =
           std::make_unique<GetSellerValuesOutput>(GetSellerValuesOutput(
-              {std::move(resultStr.value()), request_size, response_size}));
+              {std::move(httpResponse->body), request_size, response_size,
+               data_version_value}));
       std::move(on_done)(std::move(resultUPtr));
     } else {
       PS_VLOG(kNoisyWarn, context.log)
           << "SellerKeyValueAsyncHttpClients Response fail: "
-          << resultStr.status();
-      context.log.SetEventMessageField(std::move(score_signal));
-      std::move(on_done)(resultStr.status());
+          << httpResponse.status();
+      if (server_common::log::PS_VLOG_IS_ON(kKVLog)) {
+        context.log.SetEventMessageField(std::move(score_signal));
+      }
+      std::move(on_done)(httpResponse.status());
     }
   };
-  http_fetcher_async_->FetchUrl(
+  http_fetcher_async_->FetchUrlWithMetadata(
       request, static_cast<int>(absl::ToInt64Milliseconds(timeout)),
       std::move(done_callback));
   return absl::OkStatus();

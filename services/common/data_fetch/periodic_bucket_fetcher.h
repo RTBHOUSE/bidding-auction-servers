@@ -54,11 +54,13 @@ class PeriodicBucketFetcher : public FetcherInterface {
 
  protected:
   // Callback that handles a GetBlob fetch result.
-  virtual bool OnFetch(
+  virtual absl::Status OnFetch(
       const google::scp::core::AsyncContext<
           google::cmrt::sdk::blob_storage_service::v1::GetBlobRequest,
           google::cmrt::sdk::blob_storage_service::v1::GetBlobResponse>&
           context) = 0;
+
+  absl::string_view GetBucketName() { return bucket_name_; }
 
  private:
   // Performs bucket fetching with BlobStorageClient and loads code blob into
@@ -71,7 +73,7 @@ class PeriodicBucketFetcher : public FetcherInterface {
       google::cmrt::sdk::blob_storage_service::v1::ListBlobsMetadataResponse>
   ListBlobsSync();
 
-  std::string bucket_name_;
+  const std::string bucket_name_;
   absl::Duration fetch_period_ms_;
   server_common::Executor& executor_;
   google::scp::cpio::BlobStorageClientInterface& blob_storage_client_;

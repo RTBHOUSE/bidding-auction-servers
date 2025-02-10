@@ -38,6 +38,8 @@ inline constexpr server_common::metrics::PrivacyBudget kServerTotalBudget{
 
 inline constexpr double kPercentHistogram[] = {
     0.0078125, 0.015625, 0.03125, 0.0625, 0.125, 0.25, 0.5, 1};
+inline constexpr double kLinearPercentageHistogram[] = {
+    0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1};
 
 inline constexpr double kCountHistogram[] = {2,  5,   10,  20,  40,
                                              80, 160, 320, 640, 1'280};
@@ -47,9 +49,10 @@ inline constexpr absl::string_view kBs = "BS";
 inline constexpr absl::string_view kKv = "KV";
 inline constexpr absl::string_view kBfe = "BFE";
 inline constexpr absl::string_view kSfe = "SFE";
+inline constexpr absl::string_view kKAnon = "KANON";
 
 inline constexpr absl::string_view kServerName[]{
-    kAs, kBfe, kBs, kKv, kSfe,
+    kAs, kBfe, kBs, kKAnon, kKv, kSfe,
 };
 
 constexpr int kMaxBuyersSolicited = 2;
@@ -132,6 +135,13 @@ inline constexpr server_common::metrics::Definition<
 inline constexpr server_common::metrics::Definition<
     int, server_common::metrics::Privacy::kImpacting,
     server_common::metrics::Instrument::kHistogram>
+    kSfeInitiatedRequestKAnonDuration(
+        "sfe.initiated_request.to_k_anon.duration_ms",
+        "Total duration request takes to get response back from k-Anon server",
+        server_common::metrics::kTimeHistogram, 1'000, 10);
+inline constexpr server_common::metrics::Definition<
+    int, server_common::metrics::Privacy::kImpacting,
+    server_common::metrics::Instrument::kHistogram>
     kInitiatedRequestKVSize(
         "initiated_request.to_kv.size_bytes",
         "Size of the Initiated Request to KV server in Bytes",
@@ -149,6 +159,13 @@ inline constexpr server_common::metrics::Definition<
     kInitiatedRequestAuctionSize(
         "sfe.initiated_request.to_auction.size_bytes",
         "Size of the initiated Request to Auction server in Bytes",
+        server_common::metrics::kSizeHistogram, 1'000'000, 1'000);
+inline constexpr server_common::metrics::Definition<
+    int, server_common::metrics::Privacy::kImpacting,
+    server_common::metrics::Instrument::kHistogram>
+    kSfeInitiatedRequestKAnonSize(
+        "sfe.initiated_request.to_k_anon.size_bytes",
+        "Size of the initiated Request to K-Anon server in Bytes",
         server_common::metrics::kSizeHistogram, 1'000'000, 1'000);
 inline constexpr server_common::metrics::Definition<
     int, server_common::metrics::Privacy::kImpacting,
@@ -180,6 +197,14 @@ inline constexpr server_common::metrics::Definition<
         "sfe.initiated_response.to_auction.size_bytes",
         "Size of the initiated Response by Auction server in Bytes",
         server_common::metrics::kSizeHistogram, 100'000, 1'000);
+inline constexpr server_common::metrics::Definition<
+    int, server_common::metrics::Privacy::kImpacting,
+    server_common::metrics::Instrument::kHistogram>
+    kSfeInitiatedResponseKAnonSize(
+        "sfe.initiated_response.from_k_anon.size_bytes",
+        "Size of the response by K-Anon server, to SFE initiated request, in "
+        "Bytes",
+        server_common::metrics::kSizeHistogram, 100'000, 1'000);
 
 inline constexpr server_common::metrics::Definition<
     int, server_common::metrics::Privacy::kImpacting,
@@ -200,14 +225,48 @@ inline constexpr server_common::metrics::Definition<
     server_common::metrics::Instrument::kUpDownCounter>
     kBiddingZeroBidCount(
         "bidding.business_logic.zero_bid_count",
-        "Total number of times bidding service returns a zero bid", 15, 0);
+        "Total number of zero bids received in the bidding service", 15, 0);
 
 inline constexpr server_common::metrics::Definition<
     double, server_common::metrics::Privacy::kImpacting,
     server_common::metrics::Instrument::kHistogram>
-    kBiddingZeroBidPercent(
-        "bidding.business_logic.zero_bid_percent",
-        "Percentage of times bidding service returns a zero bid",
+    kBiddingZeroBidPercent("bidding.business_logic.zero_bid_percent",
+                           "Percentage of zero bids per GenerateBidsRequest",
+                           kPercentHistogram, 1, 0);
+
+inline constexpr server_common::metrics::Definition<
+    double, server_common::metrics::Privacy::kImpacting,
+    server_common::metrics::Instrument::kHistogram>
+    kKAnonTotalCacheHitPercentage(
+        "sfe.k_anon_cache.overall_hit_percentage",
+        "Percentage of hashes that can be found in either "
+        "k-anon or non-k-anon caches",
+        kPercentHistogram, 1, 0);
+
+inline constexpr server_common::metrics::Definition<
+    double, server_common::metrics::Privacy::kImpacting,
+    server_common::metrics::Instrument::kHistogram>
+    kKAnonCacheHitPercentage("sfe.k_anon_cache.hit_percentage",
+                             "Percentage of hashes that can be found in "
+                             "k-anon cache",
+                             kPercentHistogram, 1, 0);
+
+inline constexpr server_common::metrics::Definition<
+    double, server_common::metrics::Privacy::kImpacting,
+    server_common::metrics::Instrument::kHistogram>
+    kNonKAnonCacheHitPercentage("sfe.k_anon_cache.hit_percentage",
+                                "Percentage of hashes that can be found in "
+                                "non-k-anon cache",
+                                kPercentHistogram, 1, 0);
+
+inline constexpr server_common::metrics::Definition<
+    double, server_common::metrics::Privacy::kImpacting,
+    server_common::metrics::Instrument::kHistogram>
+    kBiddingFailedToBidPercent(
+        "bidding.business_logic.failed_to_bid_percent",
+        "Percentage of interest groups per GenerateBidsRequest that failed to "
+        "receive a bid (eg. due to dispatch error, UDF execution error, "
+        "unparseable response from UDF, etc.)",
         kPercentHistogram, 1, 0);
 
 inline constexpr server_common::metrics::Definition<
@@ -236,6 +295,21 @@ inline constexpr server_common::metrics::Definition<
 inline constexpr server_common::metrics::Definition<
     double, server_common::metrics::Privacy::kNonImpacting,
     server_common::metrics::Instrument::kGauge>
+    kInferenceModelDeletionSuccessCount(
+        "inference.model_deletion.success_count",
+        "Success count for deleting models from the inference sidecar");
+
+inline constexpr server_common::metrics::Definition<
+    double, server_common::metrics::Privacy::kNonImpacting,
+    server_common::metrics::Instrument::kGauge>
+    kInferenceModelDeletionFailedCountByStatus(
+        "inference.model_deletion.failed_count_by_status",
+        "Failed count for deleting models from the inference sidecar by "
+        "status");
+
+inline constexpr server_common::metrics::Definition<
+    double, server_common::metrics::Privacy::kNonImpacting,
+    server_common::metrics::Instrument::kGauge>
     kInferenceRecentModelRegistrationSuccess(
         "inference.model_registration.recent_success_by_model",
         "Success count for registering models with inference sidecar by model "
@@ -259,8 +333,33 @@ inline constexpr server_common::metrics::Definition<
 inline constexpr server_common::metrics::Definition<
     double, server_common::metrics::Privacy::kNonImpacting,
     server_common::metrics::Instrument::kGauge>
-    kInferenceAvailableModels("inference.model_registration.available_models",
-                              "List of all currently available models");
+    kInferenceAvailableModels(
+        "inference.model_registration.available_models",
+        "Model availability status: 1 means available, 0 means removed");
+
+inline constexpr server_common::metrics::Definition<
+    double, server_common::metrics::Privacy::kNonImpacting,
+    server_common::metrics::Instrument::kGauge>
+    kAvailableBlobs(
+        "system.bucket_fetch.available_blobs",
+        "Blob availability status: 1 means available, 0 means removed.");
+
+inline constexpr server_common::metrics::Definition<
+    double, server_common::metrics::Privacy::kNonImpacting,
+    server_common::metrics::Instrument::kGauge>
+    kBlobLoadStatus("system.bucket_fetch.blob_load_status",
+                    "Blob fetch and load status: 0 means success, positive "
+                    "numbers map to absl error status codes.");
+
+inline constexpr absl::string_view kSellerComponentAuctionNotAllowed =
+    "seller-component-auction-not-allowed";
+
+inline constexpr server_common::metrics::Definition<
+    int, server_common::metrics::Privacy::kNonImpacting,
+    server_common::metrics::Instrument::kGauge>
+    kInferenceModelRegistrationPrewarmLatency(
+        "inference.model_registration.prewarm_latency",
+        "E2E execution latency for model prewarm process");
 
 inline constexpr absl::string_view kSellerRejectReasons[] = {
     kRejectionReasonBidBelowAuctionFloor,
@@ -268,11 +367,13 @@ inline constexpr absl::string_view kSellerRejectReasons[] = {
     kRejectionReasonBidFromScoreAdFailedCurrencyCheck,
     kRejectionReasonBlockedByPublisher,
     kRejectionReasonCategoryExclusions,
+    kRejectionReasonDidNotMeetTheKAnonymityThreshold,
     kRejectionReasonDisapprovedByExchange,
     kRejectionReasonInvalidBid,
     kRejectionReasonLanguageExclusions,
     kRejectionReasonNotAvailable,
     kRejectionReasonPendingApprovalByExchange,
+    kSellerComponentAuctionNotAllowed,
 };
 
 inline constexpr server_common::metrics::Definition<
@@ -290,6 +391,17 @@ inline constexpr server_common::metrics::Definition<
         /*lower_bound*/ 0);
 
 inline constexpr server_common::metrics::Definition<
+    int, server_common::metrics::Privacy::kImpacting,
+    server_common::metrics::Instrument::kUpDownCounter>
+    kBiddingBidRejectedCount(
+        /*name*/ "bidding.business_logic.bid_rejected_count",
+        /*description*/
+        "Total number of times bidding service rejects a bid during a "
+        "component auction",
+        /*upper_bound*/ 100,
+        /*lower_bound*/ 0);
+
+inline constexpr server_common::metrics::Definition<
     double, server_common::metrics::Privacy::kImpacting,
     server_common::metrics::Instrument::kHistogram>
     kAuctionBidRejectedPercent(
@@ -301,12 +413,34 @@ inline constexpr server_common::metrics::Definition<
 
 inline constexpr server_common::metrics::Definition<
     int, server_common::metrics::Privacy::kImpacting,
-    server_common::metrics::Instrument::kUpDownCounter>
+    server_common::metrics::Instrument::kHistogram>
     kBiddingTotalBidsCount(
         /*name*/ "bidding.business_logic.bids_count",
-        /*description*/ "Total number of bids generated by bidding service",
+        /*description*/ "Total number of bids received in the bidding service",
+        kCountHistogram,
         /*upper_bound*/ 100,
+        /*lower_bound*/ 1);
+
+inline constexpr server_common::metrics::Definition<
+    int, server_common::metrics::Privacy::kImpacting,
+    server_common::metrics::Instrument::kUpDownCounter>
+    kBiddingDebugUrlCount(
+        /*name*/ "bidding.business_logic.debug_url_count",
+        /*description*/
+        "Total number of win and loss debug URLs sent to the seller",
+        /*upper_bound*/ 200,
         /*lower_bound*/ 0);
+
+inline constexpr server_common::metrics::Definition<
+    double, server_common::metrics::Privacy::kImpacting,
+    server_common::metrics::Instrument::kHistogram>
+    kBiddingDebugUrlsSizeBytes(
+        /*name*/ "bidding.business_logic.debug_urls_size_bytes",
+        /*description*/
+        "Total size of win and loss debug URLs sent to the seller in Bytes",
+        server_common::metrics::kSizeHistogram,
+        /*upper_bound*/ 3'000'000,
+        /*lower_bound*/ 1'000);
 
 inline constexpr server_common::metrics::Definition<
     double, server_common::metrics::Privacy::kNonImpacting,
@@ -315,13 +449,14 @@ inline constexpr server_common::metrics::Definition<
 
 inline constexpr server_common::metrics::Definition<
     int, server_common::metrics::Privacy::kImpacting,
-    server_common::metrics::Instrument::kUpDownCounter>
+    server_common::metrics::Instrument::kHistogram>
     kAuctionTotalBidsCount(
         /*name*/ "auction.business_logic.bids_count",
         /*description*/
         "Total number of bids used to score in auction service",
+        kCountHistogram,
         /*upper_bound*/ 100,
-        /*lower_bound*/ 0);
+        /*lower_bound*/ 1);
 
 inline constexpr server_common::metrics::Definition<
     int, server_common::metrics::Privacy::kImpacting,
@@ -444,7 +579,7 @@ inline constexpr server_common::metrics::Definition<
     kSfeInitiatedRequestDurationByBuyer(
         /*name*/ "sfe.initiated_request.to_bfe.duration_ms",
         /*description*/
-        "Initiated requests duration  per buyer",
+        "Initiated requests duration per buyer",
         /*partition_type*/ "buyer",
         /*max_partitions_contributed*/ kMaxBuyersSolicited,
         /*public_partitions*/ server_common::metrics::kEmptyPublicPartition,
@@ -457,7 +592,7 @@ inline constexpr server_common::metrics::Definition<
     kSfeInitiatedRequestSizeByBuyer(
         /*name*/ "sfe.initiated_request.to_bfe.size_bytes",
         /*description*/
-        "Initiated requests size  per buyer",
+        "Initiated requests size per buyer",
         /*partition_type*/ "buyer",
         /*max_partitions_contributed*/ kMaxBuyersSolicited,
         /*public_partitions*/ server_common::metrics::kEmptyPublicPartition,
@@ -515,6 +650,7 @@ inline constexpr server_common::metrics::Definition<
         /*public_partitions*/ server_common::metrics::kEmptyPublicPartition,
         /*upper_bound*/ 1,
         /*lower_bound*/ 0);
+
 inline constexpr server_common::metrics::Definition<
     int, server_common::metrics::Privacy::kImpacting,
     server_common::metrics::Instrument::kPartitionedCounter>
@@ -572,7 +708,6 @@ inline constexpr server_common::metrics::Definition<
     kComponentAdsSize("bfe.component_ads.size_bytes",
                       "Cumulative size of component_ads in Bytes",
                       server_common::metrics::kSizeHistogram);
-
 inline constexpr server_common::metrics::Definition<
     int, server_common::metrics::Privacy::kNonImpacting,
     server_common::metrics::Instrument::kHistogram>
@@ -586,6 +721,12 @@ inline constexpr server_common::metrics::Definition<
         /*description*/
         "Total number of inference requests received by the inference sidecar",
         1, 0);
+inline constexpr server_common::metrics::Definition<
+    double, server_common::metrics::Privacy::kImpacting,
+    server_common::metrics::Instrument::kHistogram>
+    kPercentIgsFiltered("bfe.business_logic.filtered_igs_percent",
+                        "Percentage of IGs filtered out via priority signals",
+                        kLinearPercentageHistogram, 1, 0);
 
 inline constexpr server_common::metrics::Definition<
     int, server_common::metrics::Privacy::kImpacting,
@@ -677,6 +818,21 @@ inline constexpr server_common::metrics::Definition<
         /*upper_bound*/ 50,
         /*lower_bound*/ 0);
 
+inline constexpr server_common::metrics::Definition<
+    int, server_common::metrics::Privacy::kImpacting,
+    server_common::metrics::Instrument::kPartitionedCounter>
+    kSfeInitiatedRequestKanonErrorCountByStatus(
+        /*name*/ "sfe.initiated_request.to_kanon.errors_count",
+        /*description*/
+        "Initiated requests to K-Anon Service that resulted in failure "
+        "partitioned by "
+        "status code",
+        /*partition_type*/ "status_code",
+        /*max_partitions_contributed*/ 1,
+        /*public_partitions*/ server_common::metrics::kEmptyPublicPartition,
+        /*upper_bound*/ 1,
+        /*lower_bound*/ 0);
+
 template <typename RequestT>
 struct RequestMetric;
 
@@ -702,19 +858,28 @@ inline constexpr const server_common::metrics::DefinitionName*
         &server_common::metrics::kCustom1,
         &server_common::metrics::kCustom2,
         &server_common::metrics::kCustom3,
+        &kAvailableBlobs,
+        &kBlobLoadStatus,
         &kRequestFailedCountByStatus,
+        &kBiddingFailedToBidPercent,
         &kBiddingTotalBidsCount,
         &kBiddingZeroBidCount,
         &kBiddingZeroBidPercent,
+        &kBiddingDebugUrlCount,
+        &kBiddingDebugUrlsSizeBytes,
         &kUdfExecutionDuration,
         &kUdfExecutionErrorCount,
         &kBiddingErrorCountByErrorCode,
+        &kBiddingBidRejectedCount,
         &kBiddingInferenceRequestDuration,
         &kInferenceCloudFetchSuccessCount,
         &kInferenceCloudFetchFailedCountByStatus,
         &kInferenceRecentModelRegistrationSuccess,
+        &kInferenceModelDeletionSuccessCount,
+        &kInferenceModelDeletionFailedCountByStatus,
         &kInferenceModelRegistrationFailedCountByStatus,
         &kInferenceRecentModelRegistrationFailure,
+        &kInferenceModelRegistrationPrewarmLatency,
         &kInferenceAvailableModels,
         &kInferenceRequestCount,
         &kInferenceRequestDuration,
@@ -766,6 +931,7 @@ inline constexpr const server_common::metrics::DefinitionName*
         &kUserBiddingSignalsSize,
         &kComponentAdsSize,
         &kIGCount,
+        &kPercentIgsFiltered,
 };
 
 template <>
@@ -789,6 +955,7 @@ inline constexpr const server_common::metrics::DefinitionName*
         &kInitiatedRequestAuctionErrorCountByStatus,
         &kInitiatedRequestBfeErrorCountByStatus,
         &kRequestFailedCountByStatus,
+        &kSfeInitiatedRequestKanonErrorCountByStatus,
         &kSfeInitiatedRequestErrorsCountByBuyer,
         &kSfeInitiatedRequestDurationByBuyer,
         &kSfeInitiatedRequestCountByBuyer,
@@ -797,16 +964,22 @@ inline constexpr const server_common::metrics::DefinitionName*
         &kInitiatedRequestKVDuration,
         &kInitiatedRequestCountByServer,
         &kInitiatedRequestAuctionDuration,
+        &kSfeInitiatedRequestKAnonDuration,
         &kInitiatedRequestKVSize,
         &kInitiatedRequestAuctionSize,
+        &kSfeInitiatedRequestKAnonSize,
         &kSfeInitiatedResponseKVSize,
         &kInitiatedResponseAuctionSize,
+        &kSfeInitiatedResponseKAnonSize,
         &kSfeErrorCountByErrorCode,
         &kRequestWithWinnerCount,
         &kSfeWithWinnerTimeMs,
         &kProtectedCiphertextSize,
         &kAuctionConfigSize,
         &kAuctionBidRejectedCount,
+        &kKAnonTotalCacheHitPercentage,
+        &kKAnonCacheHitPercentage,
+        &kNonKAnonCacheHitPercentage,
 };
 
 template <>
@@ -826,6 +999,11 @@ inline constexpr const server_common::metrics::DefinitionName*
         &server_common::metrics::kServerTotalTimeMs,
         &server_common::metrics::kRequestByte,
         &server_common::metrics::kResponseByte,
+        &server_common::metrics::kCustom1,
+        &server_common::metrics::kCustom2,
+        &server_common::metrics::kCustom3,
+        &kAvailableBlobs,
+        &kBlobLoadStatus,
         &kRequestFailedCountByStatus,
         &kAuctionTotalBidsCount,
         &kAuctionBidRejectedCount,
@@ -918,6 +1096,13 @@ class InitiatedRequest {
         LogOneServer<metric::kInitiatedRequestAuctionDuration,
                      metric::kInitiatedRequestAuctionSize,
                      metric::kInitiatedResponseAuctionSize>(
+            initiated_request_ms);
+      }
+    } else if (destination_ == metric::kKAnon) {
+      if constexpr (std::is_same_v<ContextT, SfeContext>) {
+        LogOneServer<metric::kSfeInitiatedRequestKAnonDuration,
+                     metric::kSfeInitiatedRequestKAnonSize,
+                     metric::kSfeInitiatedResponseKAnonSize>(
             initiated_request_ms);
       }
     }
@@ -1047,6 +1232,9 @@ inline void AddErrorTypePartition(
         metric::kInitiatedRequestBfeErrorCountByStatus.name_, error_list_view);
     telemetry_config.SetPartition(
         metric::kInitiatedRequestAuctionErrorCountByStatus.name_,
+        error_list_view);
+    telemetry_config.SetPartition(
+        metric::kSfeInitiatedRequestKanonErrorCountByStatus.name_,
         error_list_view);
   }
   if (server_name == metric::kBs) {

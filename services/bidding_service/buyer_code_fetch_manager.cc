@@ -23,9 +23,11 @@
 #include "services/bidding_service/bidding_code_fetch_config.pb.h"
 #include "services/bidding_service/code_wrapper/buyer_code_wrapper.h"
 #include "services/bidding_service/constants.h"
+#include "services/bidding_service/data/runtime_config.h"
 #include "services/common/clients/code_dispatcher/udf_code_loader_interface.h"
 #include "services/common/data_fetch/periodic_bucket_code_fetcher.h"
 #include "services/common/data_fetch/periodic_code_fetcher.h"
+#include "services/common/data_fetch/version_util.h"
 #include "services/common/loggers/request_log_context.h"
 #include "services/common/util/file_util.h"
 #include "src/concurrent/event_engine_executor.h"
@@ -78,6 +80,42 @@ absl::Status BuyerCodeFetchManager::End() {
   return absl::OkStatus();
 }
 
+absl::Status BuyerCodeFetchManager::ConfigureRuntimeDefaults(
+    BiddingServiceRuntimeConfig& output) {
+  if (udf_config_.fetch_mode() == blob_fetch::FETCH_MODE_BUCKET) {
+    output.use_per_request_udf_versioning = true;
+    if (enable_protected_audience_) {
+      PS_ASSIGN_OR_RETURN(
+          output.default_protected_audience_generate_bid_version,
+          GetBucketBlobVersion(
+              udf_config_.protected_auction_bidding_js_bucket(),
+              udf_config_.protected_auction_bidding_js_bucket_default_blob()));
+    }
+    if (enable_protected_app_signals_) {
+      PS_ASSIGN_OR_RETURN(
+          output.default_protected_app_signals_generate_bid_version,
+          GetBucketBlobVersion(
+              udf_config_.protected_app_signals_bidding_js_bucket(),
+              udf_config_
+                  .protected_app_signals_bidding_js_bucket_default_blob()));
+      PS_ASSIGN_OR_RETURN(output.default_prepare_data_for_ad_retrieval_version,
+                          GetBucketBlobVersion(
+                              udf_config_.ads_retrieval_js_bucket(),
+                              udf_config_.ads_retrieval_bucket_default_blob()));
+    }
+  } else {
+    output.use_per_request_udf_versioning = false;
+    output.default_protected_audience_generate_bid_version =
+        kProtectedAudienceGenerateBidBlobVersion;
+    output.default_protected_app_signals_generate_bid_version =
+        kProtectedAppSignalsGenerateBidBlobVersion;
+    output.default_prepare_data_for_ad_retrieval_version =
+        kPrepareDataForAdRetrievalBlobVersion;
+  }
+
+  return absl::OkStatus();
+}
+
 // PA only; PAS not supported.
 absl::Status BuyerCodeFetchManager::InitializeLocalCodeFetch() {
   if (udf_config_.bidding_js_path().empty()) {
@@ -86,7 +124,10 @@ absl::Status BuyerCodeFetchManager::InitializeLocalCodeFetch() {
   PS_ASSIGN_OR_RETURN(auto adtech_code_blob,
                       GetFileContent(udf_config_.bidding_js_path(),
                                      /*log_on_error=*/true));
-  adtech_code_blob = GetBuyerWrappedCode(adtech_code_blob, {});
+  BuyerCodeWrapperConfig wrapper_config = {
+      .enable_private_aggregate_reporting =
+          udf_config_.enable_private_aggregate_reporting()};
+  adtech_code_blob = GetBuyerWrappedCode(adtech_code_blob, wrapper_config);
   return loader_.LoadSync(kProtectedAudienceGenerateBidBlobVersion,
                           std::move(adtech_code_blob));
 }

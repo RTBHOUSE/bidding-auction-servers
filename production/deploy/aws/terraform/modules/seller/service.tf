@@ -14,18 +14,21 @@
  * limitations under the License.
  */
 
+terraform {
+  required_providers {
+    aws = {
+      source = "hashicorp/aws"
+    }
+  }
+}
+
 ################ SFE + Auction Setup ################
 
 module "iam_roles" {
   source      = "../../services/iam_roles"
   environment = var.environment
   operator    = var.operator
-}
-
-module "iam_groups" {
-  source      = "../../services/iam_groups"
-  environment = var.environment
-  operator    = var.operator
+  region      = var.region
 }
 
 module "networking" {
@@ -43,15 +46,6 @@ module "security_groups" {
   vpc_id      = module.networking.vpc_id
 }
 
-module "iam_group_policies" {
-  source               = "../../services/iam_group_policies"
-  operator             = var.operator
-  environment          = var.environment
-  ssh_users_group_name = module.iam_groups.ssh_users_group_name
-  ssh_instance_arn     = module.ssh.ssh_instance_arn
-}
-
-
 module "backend_services" {
   source                          = "../../services/backend_services"
   region                          = var.region
@@ -64,17 +58,6 @@ module "backend_services" {
   vpc_id                          = module.networking.vpc_id
   vpc_interface_endpoint_services = var.vpc_interface_endpoint_services
   server_instance_role_arn        = module.iam_roles.instance_role_arn
-  ssh_instance_role_arn           = module.iam_roles.ssh_instance_role_arn
-}
-
-module "ssh" {
-  source                  = "../../services/ssh"
-  environment             = var.environment
-  instance_sg_id          = module.security_groups.ssh_security_group_id
-  operator                = var.operator
-  ssh_instance_subnet_ids = module.networking.public_subnet_ids
-  instance_profile_name   = module.iam_roles.ssh_instance_profile_name
-  ssh_instance_type       = var.ssh_instance_type
 }
 
 module "security_group_rules" {
@@ -86,20 +69,18 @@ module "security_group_rules" {
   vpc_id                            = module.networking.vpc_id
   elb_security_group_id             = module.security_groups.elb_security_group_id
   instances_security_group_id       = module.security_groups.instance_security_group_id
-  ssh_security_group_id             = module.security_groups.ssh_security_group_id
   vpce_security_group_id            = module.security_groups.vpc_endpoint_security_group_id
   gateway_endpoints_prefix_list_ids = module.backend_services.gateway_endpoints_prefix_list_ids
-  ssh_source_cidr_blocks            = var.ssh_source_cidr_blocks
   use_service_mesh                  = var.use_service_mesh
   tee_kv_servers_port               = var.tee_kv_servers_port
 }
 
 module "iam_role_policies" {
   source                    = "../../services/iam_role_policies"
+  region                    = var.region
   operator                  = var.operator
   environment               = var.environment
   server_instance_role_name = module.iam_roles.instance_role_name
-  ssh_instance_role_name    = module.iam_roles.ssh_instance_role_name
   autoscaling_group_arns    = [module.autoscaling_sfe.autoscaling_group_arn, module.autoscaling_auction.autoscaling_group_arn]
   # server_parameter_arns     = []
 }
@@ -136,7 +117,7 @@ resource "aws_lb_target_group" "alb_http2_target_group" {
   name                 = "sfe-${var.environment}-${var.operator}-alb-http2-tg"
   port                 = var.envoy_port
   protocol             = "HTTP"
-  protocol_version     = "HTTP2"
+  protocol_version     = var.use_http1 ? "HTTP1" : "HTTP2"
   vpc_id               = module.networking.vpc_id
   deregistration_delay = 30
 
@@ -194,12 +175,27 @@ module "seller_app_mesh" {
 
 ################ Auction operator Setup ################
 
+# Latest AMIs per service, filtered by workspace
+data "aws_ami_ids" "auction_amis" {
+  owners         = ["self"]
+  sort_ascending = false
+
+  filter {
+    name   = "name"
+    values = ["auction_service-*"]
+  }
+  filter {
+    name   = "tag:build_env"
+    values = [terraform.workspace]
+  }
+}
 
 module "auction_mesh_service" {
   # Only create if using service mesh
   count = var.use_service_mesh ? 1 : 0
 
   source                                      = "../../services/backend_mesh_service"
+  region                                      = var.region
   operator                                    = var.operator
   environment                                 = var.environment
   service                                     = "auction"
@@ -230,6 +226,7 @@ module "load_balancing_auction" {
   count = var.use_service_mesh ? 0 : 1
 
   source                          = "../../services/load_balancing"
+  region                          = var.region
   environment                     = var.environment
   operator                        = var.operator
   service                         = "auction"
@@ -248,13 +245,14 @@ module "load_balancing_auction" {
 }
 
 module "autoscaling_auction" {
-  source                          = "../../services/autoscaling"
-  environment                     = var.environment
-  operator                        = var.operator
-  enclave_debug_mode              = var.enclave_debug_mode
-  service                         = "auction"
-  autoscaling_subnet_ids          = module.networking.private_subnet_ids
-  instance_ami_id                 = var.auction_instance_ami_id
+  source                 = "../../services/autoscaling"
+  environment            = var.environment
+  operator               = var.operator
+  enclave_debug_mode     = var.enclave_debug_mode
+  service                = "auction"
+  autoscaling_subnet_ids = module.networking.private_subnet_ids
+  # coalesce() takes any number of arguments and returns the first one that isn't null or an empty string.
+  instance_ami_id                 = coalesce(var.auction_instance_ami_id, data.aws_ami_ids.auction_amis.ids...)
   instance_security_group_id      = module.security_groups.instance_security_group_id
   instance_type                   = var.auction_instance_type
   target_group_arns               = var.use_service_mesh ? [] : module.load_balancing_auction[0].target_group_arns
@@ -280,12 +278,27 @@ module "autoscaling_auction" {
 
 ################ SFE operator Setup ################
 
+# Latest AMIs per service, filtered by workspace
+data "aws_ami_ids" "seller_frontend_amis" {
+  owners         = ["self"]
+  sort_ascending = false
+
+  filter {
+    name   = "name"
+    values = ["seller_frontend_service-*"]
+  }
+  filter {
+    name   = "tag:build_env"
+    values = [terraform.workspace]
+  }
+}
 
 module "sfe_mesh_service" {
   # Only create if using service mesh
   count = var.use_service_mesh ? 1 : 0
 
   source                                          = "../../services/frontend_mesh_service"
+  region                                          = var.region
   operator                                        = var.operator
   environment                                     = var.environment
   service                                         = "sfe"
@@ -310,6 +323,7 @@ module "sfe_mesh_service" {
 
 module "load_balancing_sfe" {
   source                          = "../../services/load_balancing"
+  region                          = var.region
   environment                     = var.environment
   operator                        = var.operator
   service                         = "sfe"
@@ -326,16 +340,18 @@ module "load_balancing_sfe" {
 }
 
 module "autoscaling_sfe" {
-  source                          = "../../services/autoscaling"
-  environment                     = var.environment
-  operator                        = var.operator
-  enclave_debug_mode              = var.enclave_debug_mode
-  service                         = "sfe"
-  autoscaling_subnet_ids          = module.networking.private_subnet_ids
-  instance_ami_id                 = var.sfe_instance_ami_id
-  instance_security_group_id      = module.security_groups.instance_security_group_id
-  instance_type                   = var.sfe_instance_type
-  target_group_arns               = concat(module.load_balancing_sfe.target_group_arns, [aws_lb_target_group.alb_http2_target_group.arn])
+  source                 = "../../services/autoscaling"
+  environment            = var.environment
+  operator               = var.operator
+  enclave_debug_mode     = var.enclave_debug_mode
+  service                = "sfe"
+  autoscaling_subnet_ids = module.networking.private_subnet_ids
+  # coalesce() takes any number of arguments and returns the first one that isn't null or an empty string.
+  instance_ami_id            = coalesce(var.sfe_instance_ami_id, data.aws_ami_ids.seller_frontend_amis.ids...)
+  instance_security_group_id = module.security_groups.instance_security_group_id
+  instance_type              = var.sfe_instance_type
+  target_group_arns          = concat(module.load_balancing_sfe.target_group_arns, [aws_lb_target_group.alb_http2_target_group.arn])
+
   autoscaling_desired_capacity    = var.sfe_autoscaling_desired_capacity
   autoscaling_max_size            = var.sfe_autoscaling_max_size
   autoscaling_min_size            = var.sfe_autoscaling_min_size

@@ -443,14 +443,17 @@ InterestGroupForBidding MakeARandomInterestGroupForBiddingFromBrowser() {
 
 GenerateBidsRequest::GenerateBidsRawRequest
 MakeARandomGenerateBidsRawRequestForAndroid(bool enforce_kanon,
-                                            int multi_bid_limit) {
+                                            int multi_bid_limit, int num_igs) {
   // request object will take ownership
   // https://developers.google.com/protocol-buffers/docs/reference/cpp-generated
   GenerateBidsRequest::GenerateBidsRawRequest raw_request;
-  *raw_request.mutable_interest_group_for_bidding()->Add() =
-      MakeARandomInterestGroupForBiddingFromAndroid();
-  *raw_request.mutable_interest_group_for_bidding()->Add() =
-      MakeARandomInterestGroupForBiddingFromAndroid();
+  for (int i = 0; i < num_igs; i++) {
+    *raw_request.mutable_interest_group_for_bidding()->Add() =
+        MakeARandomInterestGroupForBiddingFromAndroid();
+  }
+
+  raw_request.mutable_blob_versions()
+      ->set_protected_app_signals_generate_bid_udf("android/test");
   raw_request.set_allocated_auction_signals(
       std::move(MakeARandomStructJsonString(MakeARandomInt(0, 100))).release());
   raw_request.set_allocated_buyer_signals(
@@ -474,6 +477,8 @@ MakeARandomGenerateBidsRequestForBrowser(bool enforce_kanon,
       MakeARandomInterestGroupForBiddingFromBrowser();
   *raw_request.mutable_interest_group_for_bidding()->Add() =
       MakeARandomInterestGroupForBiddingFromBrowser();
+  raw_request.mutable_blob_versions()->set_protected_audience_generate_bid_udf(
+      "browser/test");
   raw_request.set_allocated_auction_signals(
       std::move(MakeARandomStructJsonString(MakeARandomInt(0, 100))).release());
   raw_request.set_allocated_buyer_signals(
@@ -614,6 +619,10 @@ AdWithBid MakeARandomAdWithBid(int64_t seed, bool debug_reporting_enabled,
   bid.set_modeling_signals(seed);
   bid.set_bid_currency("USD");
   bid.set_buyer_reporting_id(absl::StrFormat("id_%s", random_string));
+  bid.set_buyer_and_seller_reporting_id(
+      absl::StrFormat("id_%s", random_string));
+  bid.set_selected_buyer_and_seller_reporting_id(
+      absl::StrFormat("id_%s", random_string));
   if (debug_reporting_enabled) {
     bid.mutable_debug_report_urls()->set_auction_debug_win_url(
         absl::StrFormat("%s/win", random_url));
@@ -641,6 +650,10 @@ roma_service::ProtectedAudienceBid MakeARandomRomaProtectedAudienceBid(
   bid.set_modeling_signals(seed);
   bid.set_bid_currency("USD");
   bid.set_buyer_reporting_id(absl::StrFormat("id_%s", random_string));
+  bid.set_buyer_and_seller_reporting_id(
+      absl::StrFormat("id_%s", random_string));
+  bid.set_selected_buyer_and_seller_reporting_id(
+      absl::StrFormat("id_%s", random_string));
   if (debug_reporting_enabled) {
     bid.mutable_debug_report_urls()->set_auction_debug_win_url(
         absl::StrFormat("%s/win", random_url));
@@ -774,6 +787,7 @@ GetBidsRequest::GetBidsRawRequest MakeARandomGetBidsRawRequest() {
   // request object will take ownership
   // https://developers.google.com/protocol-buffers/docs/reference/cpp-generated
   GetBidsRequest::GetBidsRawRequest raw_request;
+  raw_request.set_client_type(ClientType::CLIENT_TYPE_BROWSER);
   raw_request.set_publisher_name("publisher_name");
   raw_request.set_allocated_auction_signals(
       MakeARandomStructJsonString(1).release());

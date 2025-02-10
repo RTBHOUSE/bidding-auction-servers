@@ -21,8 +21,10 @@ namespace privacy_sandbox::bidding_auction_servers {
 SelectAdReactorInvalid::SelectAdReactorInvalid(
     grpc::CallbackServerContext* context, const SelectAdRequest* request,
     SelectAdResponse* response, const ClientRegistry& clients,
-    const TrustedServersConfigClient& config_client)
-    : SelectAdReactor(context, request, response, clients, config_client),
+    const TrustedServersConfigClient& config_client,
+    const ReportWinMap& report_win_map)
+    : SelectAdReactor(context, request, response, clients, config_client,
+                      report_win_map),
       client_type_(request->client_type()) {}
 
 void SelectAdReactorInvalid::Execute() {
@@ -52,7 +54,8 @@ void SelectAdReactorInvalid::Execute() {
 
 absl::StatusOr<std::string> SelectAdReactorInvalid::GetNonEncryptedResponse(
     const std::optional<ScoreAdsResponse::AdScore>& high_score,
-    const std::optional<AuctionResult::Error>& error) {
+    const std::optional<AuctionResult::Error>& error,
+    const AdScores* ghost_winning_scores) {
   return "";
 }
 
@@ -72,5 +75,12 @@ SelectAdReactorInvalid::GetDecodedBuyerinputs(
         encoded_buyer_inputs) {
   return {};
 }
+
+KAnonJoinCandidate SelectAdReactorInvalid::GetKAnonJoinCandidate(
+    const ScoreAdsResponse::AdScore& score) {
+  return {};
+}
+
+absl::string_view SelectAdReactorInvalid::GetKAnonSetType() { return ""; }
 
 }  // namespace privacy_sandbox::bidding_auction_servers

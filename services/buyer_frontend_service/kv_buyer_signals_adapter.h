@@ -28,7 +28,7 @@
 using kv_server::v2::GetValuesResponse;
 
 namespace privacy_sandbox::bidding_auction_servers {
-// Convert a TKV V2 response to a serilized json string of format that
+// Convert a TKV V2 response to a serialized json string of format that
 // `PrepareAndGenerateProtectedAudienceBid` expects.
 // {
 //   "keys" :
@@ -54,7 +54,8 @@ absl::StatusOr<std::unique_ptr<BiddingSignals>> ConvertV2BiddingSignalsToV1(
 // v1 implementation, we are not passing IG names, since we don't really need
 // those on TKV side to do the keys lookup.
 absl::StatusOr<std::unique_ptr<kv_server::v2::GetValuesRequest>>
-CreateV2BiddingRequest(const BiddingSignalsRequest& bidding_signals_request);
+CreateV2BiddingRequest(const BiddingSignalsRequest& bidding_signals_request,
+                       bool propagate_buyer_signals_to_tkv = false);
 }  // namespace privacy_sandbox::bidding_auction_servers
 
 #endif  // SERVICES_BUYER_FRONTEND_SERVICE_KV_BUYER_SIGNALS_ADAPTER_H_

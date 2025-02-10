@@ -15,6 +15,7 @@
 #ifndef SERVICES_AUCTION_SERVICE_REPORTING_SELLER_AND_BUYER_REPORTING_MANAGER_H_
 #define SERVICES_AUCTION_SERVICE_REPORTING_SELLER_AND_BUYER_REPORTING_MANAGER_H_
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -24,12 +25,13 @@
 #include "services/auction_service/reporting/reporting_helper.h"
 #include "services/auction_service/reporting/reporting_response.h"
 #include "services/common/clients/code_dispatcher/v8_dispatch_client.h"
+#include "services/common/private_aggregation/private_aggregation_post_auction_util.h"
 
 namespace privacy_sandbox::bidding_auction_servers {
 
 inline constexpr int kReportResultArgSize = 4;
 
-enum class ReportResultArgs : int {
+enum class ReportResultArgs : std::uint8_t {
   kAuctionConfig,
   kSellerReportingSignals,
   kDirectFromSellerSignals,
@@ -45,7 +47,8 @@ inline constexpr int ReportResultArgIndex(ReportResultArgs arg) {
 // console.errors and console.warnings will be logged.
 absl::StatusOr<ReportResultResponse> ParseReportResultResponse(
     const ReportingDispatchRequestConfig& dispatch_request_config,
-    absl::string_view response, RequestLogContext& log_context);
+    absl::string_view response, const BaseValues& base_values,
+    RequestLogContext& log_context);
 
 // Generates device signals for reportResult input
 rapidjson::Document GenerateSellerDeviceSignals(

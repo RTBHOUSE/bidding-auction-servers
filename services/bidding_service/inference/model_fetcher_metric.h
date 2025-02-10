@@ -45,6 +45,19 @@ class ModelFetcherMetric {
     return cloud_fetch_failure_count_by_error_code_;
   }
 
+  static absl::flat_hash_map<std::string, double> GetModelDeletionSuccessCount()
+      ABSL_LOCKS_EXCLUDED(mu_) {
+    absl::MutexLock lock(&mu_);
+    return absl::flat_hash_map<std::string, double>{
+        {"model deletion", model_deletion_success_count_}};
+  }
+
+  static absl::flat_hash_map<std::string, double>
+  GetModelDeletionFailedCountByStatus() ABSL_LOCKS_EXCLUDED(mu_) {
+    absl::MutexLock lock(&mu_);
+    return model_deletion_failure_count_by_error_code_;
+  }
+
   static absl::flat_hash_map<std::string, double>
   GetRecentModelRegistrationSuccess() ABSL_LOCKS_EXCLUDED(mu_) {
     absl::MutexLock lock(&mu_);
@@ -63,10 +76,29 @@ class ModelFetcherMetric {
     return model_registration_failure_count_by_error_code_;
   }
 
+  static absl::flat_hash_map<std::string, double>
+  GetModelRegistrationPrewarmLatency() ABSL_LOCKS_EXCLUDED(mu_) {
+    absl::MutexLock lock(&mu_);
+    return model_registration_prewarm_latency_;
+  }
+
   static absl::flat_hash_map<std::string, double> GetAvailableModels()
       ABSL_LOCKS_EXCLUDED(mu_) {
     absl::MutexLock lock(&mu_);
-    return available_models_;
+    // Need to at least report once that a model is not available after eviction
+    // before removing its entry from the map. Otherwise cloud monitoring
+    // systems could keep reporting the last received value for a given model.
+    absl::flat_hash_map<std::string, double> available_models =
+        available_models_;
+    for (auto it = available_models_.begin(); it != available_models_.end();) {
+      if (it->second == 0) {
+        model_registration_prewarm_latency_.erase(it->first);
+        available_models_.erase(it++);
+      } else {
+        it++;
+      }
+    }
+    return available_models;
   }
 
   static void IncrementCloudFetchFailedCountByStatus(
@@ -79,6 +111,18 @@ class ModelFetcherMetric {
   static void IncrementCloudFetchSuccessCount() ABSL_LOCKS_EXCLUDED(mu_) {
     absl::MutexLock lock(&mu_);
     ++cloud_fetch_success_count_;
+  }
+
+  static void IncrementModelDeletionFailedCountByStatus(
+      absl::StatusCode error_code) ABSL_LOCKS_EXCLUDED(mu_) {
+    absl::MutexLock lock(&mu_);
+    ++model_deletion_failure_count_by_error_code_[absl::StatusCodeToString(
+        error_code)];
+  }
+
+  static void IncrementModelDeletionSuccessCount() ABSL_LOCKS_EXCLUDED(mu_) {
+    absl::MutexLock lock(&mu_);
+    ++model_deletion_success_count_;
   }
 
   static void UpdateRecentModelRegistrationSuccess(
@@ -109,10 +153,42 @@ class ModelFetcherMetric {
   static void UpdateAvailableModels(const std::vector<std::string>& models)
       ABSL_LOCKS_EXCLUDED(mu_) {
     absl::MutexLock lock(&mu_);
-    available_models_.clear();
+    // Resets count to 0 for a model no longer available. The metric counter
+    // entry for a deleted model will be erased after reporting.
+    for (auto& [model, count] : available_models_) {
+      count = 0;
+    }
     for (const auto& model : models) {
       ++available_models_[model];
     }
+  }
+
+  static void UpdateModelRegistrationPrewarmLatency(
+      const absl::flat_hash_map<std::string, double>& prewarm_latencys)
+      ABSL_LOCKS_EXCLUDED(mu_) {
+    absl::MutexLock lock(&mu_);
+    for (const auto& [model_name, latency] : prewarm_latencys) {
+      model_registration_prewarm_latency_[model_name] = latency;
+    }
+  }
+
+  // Clears all metric counters.
+  static void ClearStates() ABSL_LOCKS_EXCLUDED(mu_) {
+    absl::MutexLock lock(&mu_);
+
+    cloud_fetch_success_count_ = 0;
+    cloud_fetch_failure_count_by_error_code_.clear();
+
+    model_deletion_success_count_ = 0;
+    model_deletion_failure_count_by_error_code_.clear();
+
+    recent_model_registration_success_.clear();
+    recent_model_registration_failure_.clear();
+    model_registration_failure_count_by_error_code_.clear();
+
+    model_registration_prewarm_latency_.clear();
+
+    available_models_.clear();
   }
 
  private:
@@ -122,6 +198,11 @@ class ModelFetcherMetric {
 
   static inline absl::flat_hash_map<std::string, double>
       cloud_fetch_failure_count_by_error_code_ ABSL_GUARDED_BY(mu_){};
+
+  static inline int model_deletion_success_count_ ABSL_GUARDED_BY(mu_){0};
+
+  static inline absl::flat_hash_map<std::string, double>
+      model_deletion_failure_count_by_error_code_ ABSL_GUARDED_BY(mu_){};
 
   static inline absl::flat_hash_map<std::string, double>
       recent_model_registration_success_ ABSL_GUARDED_BY(mu_){};
@@ -134,6 +215,9 @@ class ModelFetcherMetric {
 
   static inline absl::flat_hash_map<std::string, double> available_models_
       ABSL_GUARDED_BY(mu_){};
+
+  static inline absl::flat_hash_map<std::string, double>
+      model_registration_prewarm_latency_ ABSL_GUARDED_BY(mu_){};
 };
 
 // Adds model fetcher metrics to a metric context map to bidding server.
@@ -146,6 +230,12 @@ inline absl::Status AddModelFetcherMetricToBidding() {
       metric::kInferenceCloudFetchFailedCountByStatus,
       inference::ModelFetcherMetric::GetCloudFetchFailedCountByStatus));
   PS_RETURN_IF_ERROR(context_map->AddObserverable(
+      metric::kInferenceModelDeletionSuccessCount,
+      inference::ModelFetcherMetric::GetModelDeletionSuccessCount));
+  PS_RETURN_IF_ERROR(context_map->AddObserverable(
+      metric::kInferenceModelDeletionFailedCountByStatus,
+      inference::ModelFetcherMetric::GetModelDeletionFailedCountByStatus));
+  PS_RETURN_IF_ERROR(context_map->AddObserverable(
       metric::kInferenceRecentModelRegistrationSuccess,
       inference::ModelFetcherMetric::GetRecentModelRegistrationSuccess));
   PS_RETURN_IF_ERROR(context_map->AddObserverable(
@@ -154,6 +244,9 @@ inline absl::Status AddModelFetcherMetricToBidding() {
   PS_RETURN_IF_ERROR(context_map->AddObserverable(
       metric::kInferenceAvailableModels,
       inference::ModelFetcherMetric::GetAvailableModels));
+  PS_RETURN_IF_ERROR(context_map->AddObserverable(
+      metric::kInferenceModelRegistrationPrewarmLatency,
+      inference::ModelFetcherMetric::GetModelRegistrationPrewarmLatency));
   return context_map->AddObserverable(
       metric::kInferenceModelRegistrationFailedCountByStatus,
       inference::ModelFetcherMetric::GetModelRegistrationFailedCountByStatus);
