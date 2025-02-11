@@ -29,6 +29,7 @@
 #include "absl/synchronization/blocking_counter.h"
 #include "absl/time/time.h"
 #include "services/common/data_fetch/fetcher_interface.h"
+#include "services/common/data_fetch/version_util.h"
 #include "services/common/loggers/request_log_context.h"
 #include "services/common/util/request_response_constants.h"
 #include "src/core/interface/async_context.h"
@@ -61,14 +62,23 @@ PeriodicBucketCodeFetcher::PeriodicBucketCodeFetcher(
       wrap_code_(std::move(wrap_code)),
       loader_(*loader) {}
 
-bool PeriodicBucketCodeFetcher::OnFetch(
+absl::Status PeriodicBucketCodeFetcher::OnFetch(
     const AsyncContext<GetBlobRequest, GetBlobResponse>& context) {
-  const std::string version = context.request->blob_metadata().blob_name();
+  PS_ASSIGN_OR_RETURN(
+      const std::string version,
+      GetBucketBlobVersion(GetBucketName(),
+                           context.request->blob_metadata().blob_name()),
+      _ << "Could not read blob name.");
   if (!context.result.Successful()) {
-    PS_LOG(ERROR, SystemLogContext())
-        << "Failed to fetch blob: " << version
-        << GetErrorMessage(context.result.status_code);
-    return false;
+    return absl::Status(
+        absl::StatusCode::kInvalidArgument,
+        absl::StrCat("Failed to fetch blob: ", version,
+                     GetErrorMessage(context.result.status_code)));
+  }
+  if (!context.response->has_blob() ||
+      context.response->blob().data().empty()) {
+    return absl::Status(absl::StatusCode::kNotFound,
+                        absl::StrCat("Blob missing data: ", version));
   }
   auto result_value = {context.response->blob().data()};
   std::string wrapped_code = wrap_code_(result_value);
@@ -77,14 +87,11 @@ bool PeriodicBucketCodeFetcher::OnFetch(
   std::string success_log_message =
       absl::StrCat("Current code loaded into Roma for version ", version, ":\n",
                    wrapped_code);
-  absl::Status roma_result = loader_.LoadSync(version, std::move(wrapped_code));
-  if (!roma_result.ok()) {
-    PS_LOG(ERROR, SystemLogContext())
-        << "Roma failed to load blob: " << roma_result;
-    return false;
-  }
+  PS_RETURN_IF_ERROR(loader_.LoadSync(version, std::move(wrapped_code)))
+      << "Roma failed to load blob.";
+
   PS_VLOG(kSuccess) << success_log_message;
-  return true;
+  return absl::OkStatus();
 }
 
 }  // namespace privacy_sandbox::bidding_auction_servers

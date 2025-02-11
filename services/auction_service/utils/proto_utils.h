@@ -23,6 +23,7 @@
 
 #include <google/protobuf/util/json_util.h>
 
+#include "absl/base/nullability.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
@@ -35,21 +36,34 @@
 #include "services/common/loggers/request_log_context.h"
 #include "src/util/status_macro/status_macros.h"
 
+// Scoring signals are set to null when KV lookup fails. This is to maintain
+// parity with Chrome.
+constexpr absl::string_view kNullScoringSignalsJson = "null";
+
 namespace privacy_sandbox::bidding_auction_servers {
+
+struct ReportingIdsParamForBidMetadata {
+  std::optional<absl::string_view> buyer_reporting_id;
+  std::optional<absl::string_view> buyer_and_seller_reporting_id;
+  std::optional<absl::string_view> selected_buyer_and_seller_reporting_id;
+};
 
 std::string MakeBidMetadata(
     absl::string_view publisher_hostname,
     absl::string_view interest_group_owner, absl::string_view render_url,
     const google::protobuf::RepeatedPtrField<std::string>&
         ad_component_render_urls,
-    absl::string_view top_level_seller, absl::string_view bid_currency);
+    absl::string_view top_level_seller, absl::string_view bid_currency,
+    const uint32_t seller_data_version,
+    ReportingIdsParamForBidMetadata reporting_ids = {});
 
 std::string MakeBidMetadataForTopLevelAuction(
     absl::string_view publisher_hostname,
     absl::string_view interest_group_owner, absl::string_view render_url,
     const google::protobuf::RepeatedPtrField<std::string>&
         ad_component_render_urls,
-    absl::string_view component_seller, absl::string_view bid_currency);
+    absl::string_view component_seller, absl::string_view bid_currency,
+    const uint32_t seller_data_version);
 
 std::shared_ptr<std::string> BuildAuctionConfig(
     const ScoreAdsRequest::ScoreAdsRawRequest& raw_request);
@@ -57,7 +71,8 @@ std::shared_ptr<std::string> BuildAuctionConfig(
 absl::StatusOr<absl::flat_hash_map<std::string, rapidjson::StringBuffer>>
 BuildTrustedScoringSignals(
     const ScoreAdsRequest::ScoreAdsRawRequest& raw_request,
-    RequestLogContext& log_context);
+    RequestLogContext& log_context,
+    const bool require_scoring_signals_for_scoring);
 
 void MayPopulateScoringSignalsForProtectedAppSignals(
     const ScoreAdsRequest::ScoreAdsRawRequest& raw_request,
@@ -69,8 +84,8 @@ void MayLogScoreAdsInput(const std::vector<std::shared_ptr<std::string>>& input,
                          RequestLogContext& log_context);
 
 absl::StatusOr<rapidjson::Document> ParseAndGetScoreAdResponseJson(
-    bool enable_ad_tech_code_logging, const std::string& response,
-    RequestLogContext& log_context);
+    bool enable_ad_tech_code_logging, RequestLogContext& log_context,
+    const rapidjson::Document& score_ads_wrapper_response);
 
 ScoreAdsResponse::AdScore::AdRejectionReason BuildAdRejectionReason(
     absl::string_view interest_group_owner,
@@ -94,13 +109,26 @@ constexpr int ScoreArgIndex(ScoreAdArgs arg) {
 }
 
 /**
+ * Maps GhostWinnerForTopLevelAuction object to AdWithBidMetadata object for
+ * creating dispatch requests and performing post auction operations.
+ * The ghost_winner object is invalidated after this method is called
+ * since this method will try to move values rather than copy.
+ */
+std::unique_ptr<ScoreAdsRequest::ScoreAdsRawRequest::AdWithBidMetadata>
+MapKAnonGhostWinnerToAdWithBidMetadata(
+    absl::string_view owner, absl::string_view ig_name,
+    AuctionResult::KAnonGhostWinner::GhostWinnerForTopLevelAuction&
+        ghost_winner);
+
+/**
  * Maps component auction result object to AdWithBidMetadata object for
  * creating dispatch requests and performing post auction operations.
  * The auction result object is invalidated after this method is called
  * since this method will try to move values rather than copy.
  */
 std::unique_ptr<ScoreAdsRequest::ScoreAdsRawRequest::AdWithBidMetadata>
-MapAuctionResultToAdWithBidMetadata(AuctionResult& auction_result);
+MapAuctionResultToAdWithBidMetadata(AuctionResult& auction_result,
+                                    bool k_anon_status = false);
 
 /**
  * Builds the ScoreAdInput, following the description here:
@@ -131,11 +159,9 @@ absl::StatusOr<DispatchRequest> BuildScoreAdRequest(
 template <typename T>
 absl::StatusOr<DispatchRequest> BuildScoreAdRequest(
     const T& ad, const std::shared_ptr<std::string>& auction_config,
-    const absl::flat_hash_map<std::string, rapidjson::StringBuffer>&
-        scoring_signals,
-    const bool enable_debug_reporting, RequestLogContext& log_context,
-    const bool enable_adtech_code_logging, absl::string_view bid_metadata,
-    absl::string_view code_version) {
+    absl::string_view scoring_signals, const bool enable_debug_reporting,
+    RequestLogContext& log_context, const bool enable_adtech_code_logging,
+    absl::string_view bid_metadata, absl::string_view code_version) {
   std::string ad_object_json;
   if (ad.ad().has_struct_value()) {
     PS_RETURN_IF_ERROR(
@@ -143,10 +169,11 @@ absl::StatusOr<DispatchRequest> BuildScoreAdRequest(
   } else {
     ad_object_json = ad.ad().string_value();
   }
-  return BuildScoreAdRequest(
-      ad.render(), ad_object_json, scoring_signals.at(ad.render()).GetString(),
-      ad.bid(), auction_config, bid_metadata, log_context,
-      enable_adtech_code_logging, enable_debug_reporting, code_version);
+
+  return BuildScoreAdRequest(ad.render(), ad_object_json, scoring_signals,
+                             ad.bid(), auction_config, bid_metadata,
+                             log_context, enable_adtech_code_logging,
+                             enable_debug_reporting, code_version);
 }
 
 }  // namespace privacy_sandbox::bidding_auction_servers

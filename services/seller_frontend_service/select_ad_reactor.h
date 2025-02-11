@@ -22,6 +22,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include <grpcpp/grpcpp.h>
 
@@ -31,6 +32,7 @@
 #include "api/bidding_auction_servers.pb.h"
 #include "include/grpcpp/impl/codegen/server_callback.h"
 #include "quiche/oblivious_http/oblivious_http_gateway.h"
+#include "services/common/clients/k_anon_server/k_anon_client.h"
 #include "services/common/feature_flags.h"
 #include "services/common/loggers/build_input_process_response_benchmarking_logger.h"
 #include "services/common/loggers/no_ops_logger.h"
@@ -42,7 +44,10 @@
 #include "services/common/util/error_reporter.h"
 #include "services/common/util/request_metadata.h"
 #include "services/common/util/request_response_constants.h"
+#include "services/seller_frontend_service/data/k_anon.h"
 #include "services/seller_frontend_service/data/scoring_signals.h"
+#include "services/seller_frontend_service/private_aggregation/private_aggregation_helper.h"
+#include "services/seller_frontend_service/report_win_map.h"
 #include "services/seller_frontend_service/seller_frontend_service.h"
 #include "services/seller_frontend_service/util/encryption_util.h"
 #include "services/seller_frontend_service/util/validation_utils.h"
@@ -61,6 +66,18 @@ inline constexpr char kNoBidsReceived[] = "No bids received.";
 
 inline constexpr char kAllBidsRejectedBuyerCurrencyMismatch[] =
     "All bids rejected for failure to match buyer currency.";
+inline constexpr char kCheckSignalsFetchFlagV1ErrorMsg[] =
+    "Definite logical error: Called V1 function to get scoring signals despite "
+    "SCORING_SIGNALS_FETCH_MODE being NOT_FETCHED.";
+inline constexpr char kCheckSignalsFetchFlagV2ErrorMsg[] =
+    "Definite logical error: Called V2 function to get scoring signals despite "
+    "SCORING_SIGNALS_FETCH_MODE being NOT_FETCHED.";
+inline constexpr char kCheckProviderNullnessV1ErrorMsg[] =
+    "Definite logical error: Called V1 function to get scoring signals despite "
+    "the kv async client being nullptr.";
+inline constexpr char kCheckProviderNullnessV2ErrorMsg[] =
+    "Definite logical error: Called V2 function to get scoring signals despite "
+    "the kv async client being nullptr.";
 
 inline constexpr absl::string_view kWinningAd = "winning_ad";
 
@@ -70,11 +87,14 @@ inline constexpr int kMaxChaffRequestSizeBytes = 95000;
 inline constexpr int kMinChaffRequests = 1;
 inline constexpr int kMinChaffRequestsWithNoRealRequests = 2;
 
+inline constexpr char kFledge[] = "fledge";
+inline constexpr char kAndroid[] = "android";
+
 // Maximum number of buyers that can be sent requests when chaffing is enabled.
 inline constexpr int kMaxBuyersSolicitedChaffingEnabled = 15;
 
 struct ChaffingConfig {
-  absl::flat_hash_set<std::string_view> chaff_request_candidates;
+  std::vector<std::string_view> chaff_request_candidates;
   int num_chaff_requests = 0;
   int num_real_requests = 0;
 };
@@ -85,12 +105,20 @@ struct ChaffingConfig {
 // necessary state and grpc releases the reactor from memory.
 class SelectAdReactor : public grpc::ServerUnaryReactor {
  public:
+  using AdScores =
+      google::protobuf::RepeatedPtrField<ScoreAdsResponse::AdScore>;
+  using BidKAnonHashSets =
+      absl::flat_hash_map<const google::protobuf::Message*,
+                          absl::flat_hash_set<std::string>>;
+
   explicit SelectAdReactor(
       grpc::CallbackServerContext* context, const SelectAdRequest* request,
       SelectAdResponse* response, const ClientRegistry& clients,
       const TrustedServersConfigClient& config_client,
-      bool enable_cancellation = false, bool enable_kanon = false,
-      bool fail_fast = true,
+      const ReportWinMap& report_win_map, bool enable_cancellation = false,
+      bool enable_kanon = false,
+      bool enable_buyer_private_aggregate_reporting = false,
+      int per_adtech_paapi_contributions_limit = 0, bool fail_fast = true,
       int max_buyers_solicited = metric::kMaxBuyersSolicited);
 
   // Initiate the asynchronous execution of the SelectAdRequest.
@@ -100,11 +128,16 @@ class SelectAdReactor : public grpc::ServerUnaryReactor {
   using ErrorHandlerSignature = const std::function<void(absl::string_view)>&;
   using AuctionConfig = SelectAdRequest::AuctionConfig;
 
+  // Extracts the AuctionConfig from the SelectAdRequest object.
+  grpc::Status ExtractAuctionConfig();
+
   // Gets a string representing the response to be returned to the client. This
   // data will be encrypted before it is sent back to the client.
   virtual absl::StatusOr<std::string> GetNonEncryptedResponse(
       const std::optional<ScoreAdsResponse::AdScore>& high_score,
-      const std::optional<AuctionResult::Error>& error) = 0;
+      const std::optional<AuctionResult::Error>& error,
+      const AdScores* ghost_winning_scores = nullptr,
+      int per_adtech_paapi_contributions_limit = 0) = 0;
 
   // Decodes the plaintext payload and returns a `ProtectedAudienceInput` proto.
   // Any errors while decoding are reported to error accumulator object.
@@ -118,16 +151,19 @@ class SelectAdReactor : public grpc::ServerUnaryReactor {
 
   // Returns the decoded BuyerInput from the encoded/compressed BuyerInput.
   // Any errors while decoding are reported to error accumulator object.
-  virtual absl::flat_hash_map<absl::string_view, BuyerInput>
+  virtual absl::flat_hash_map<absl::string_view, BuyerInputForBidding>
   GetDecodedBuyerinputs(const google::protobuf::Map<std::string, std::string>&
                             encoded_buyer_inputs) = 0;
 
   virtual std::unique_ptr<GetBidsRequest::GetBidsRawRequest>
   CreateGetBidsRequest(const std::string& buyer_ig_owner,
-                       const BuyerInput& buyer_input);
+                       const BuyerInputForBidding& buyer_input);
 
   virtual std::unique_ptr<ScoreAdsRequest::ScoreAdsRawRequest>
   CreateScoreAdsRequest();
+
+  virtual KAnonJoinCandidate GetKAnonJoinCandidate(
+      const ScoreAdsResponse::AdScore& score) = 0;
 
   // Checks if any client visible errors have been observed.
   bool HaveClientVisibleErrors();
@@ -168,14 +204,14 @@ class SelectAdReactor : public grpc::ServerUnaryReactor {
     } else {
       bool is_any_buyer_input_valid = false;
       std::set<std::string> observed_errors;
-      for (const auto& [buyer, buyer_input] : *buyer_inputs_) {
+      for (const auto& [buyer, buyer_input_for_bidding] : *buyer_inputs_) {
         bool any_error = false;
         if (buyer.empty()) {
           observed_errors.insert(kEmptyInterestGroupOwner);
           any_error = true;
         }
-        if (buyer_input.interest_groups().empty() &&
-            !buyer_input.has_protected_app_signals()) {
+        if (buyer_input_for_bidding.interest_groups().empty() &&
+            !buyer_input_for_bidding.has_protected_app_signals()) {
           observed_errors.insert(absl::StrFormat(
               kMissingInterestGroupsAndProtectedSignals, buyer));
           any_error = true;
@@ -267,6 +303,12 @@ class SelectAdReactor : public grpc::ServerUnaryReactor {
   // each Buyer is used as a key for the Seller Key-Value lookup.
   void CancellableFetchScoringSignals();
 
+  [[deprecated]] void CancellableFetchScoringSignalsV1(
+      const ScoringSignalsRequest& scoring_signals_request);
+
+  void CancellableFetchScoringSignalsV2(
+      const ScoringSignalsRequest& scoring_signals_request);
+
   // Handles recording the fetched scoring signals to state.
   // If the code blob is already fetched, this function initiates scoring the
   // auction.
@@ -290,9 +332,21 @@ class SelectAdReactor : public grpc::ServerUnaryReactor {
       absl::StatusOr<std::unique_ptr<ScoreAdsResponse::ScoreAdsRawResponse>>
           status);
 
-  // Sends debug reporting pings to buyers for the interest groups.
+  // Sends debug reporting pings in all cases except for the winning interest
+  // group in component auctions.
   void PerformDebugReporting(
       const std::optional<ScoreAdsResponse::AdScore>& high_score);
+
+  // Adds buyer debug reports for the winning interest group in component
+  // auctions to the adtech_origin_debug_urls_map_.
+  void PopulateBuyerDebugReportsForComponentAuctionWinner(
+      const AdWithBid& ad_with_bid,
+      const PostAuctionSignals& post_auction_signals);
+
+  // Adds seller debug reports for the winning interest group in component
+  // auctions to the adtech_origin_debug_urls_map_.
+  void PopulateSellerDebugReportsForComponentAuctionWinner(
+      const ScoreAdsResponse::AdScore& high_score);
 
   // Encrypts the AuctionResult and sets the ciphertext field in the response.
   // Returns whether encryption was successful.
@@ -318,24 +372,51 @@ class SelectAdReactor : public grpc::ServerUnaryReactor {
       const AdWithBid& input, absl::string_view interest_group_owner,
       bool k_anon_status);
 
-  bool GetKAnonStatusForAdWithBid(absl::string_view ad_key);
-
   CLASS_CANCELLATION_WRAPPER(FetchScoringSignals, enable_cancellation_,
                              request_context_, FinishWithStatus)
   CLASS_CANCELLATION_WRAPPER(ScoreAds, enable_cancellation_, request_context_,
                              FinishWithStatus)
 
+  // Populates hashes for each bid found in shared_buyer_bids_map_ into
+  // bid_k_anon_hashes_ while simultaneously returning all the hashes that can
+  // then be used to query the k-anon service.
+  virtual BidKAnonHashSets GetKAnonHashesForBids();
+
+  // Returns the set type for the k-anon hashes that are to be queried from
+  // k-anon service.
+  virtual absl::string_view GetKAnonSetType() = 0;
+
+  // Queries k-anon service for the kanon status of hashes and stores the k-anon
+  // hashes by set type in `queried_k_anon_hashes_`.
+  void QueryKAnonHashes();
+
+  // Populates the k-anon status for each bid based on the k-anon hashes
+  // returned in response by the k-anon service. To consider an ad k-anon,
+  // its render URL hash, reporting ID hashes and the component render URL
+  // hashes should all be k-anonymous.
+  void PopulateKAnonStatusForBids();
+
   // Initialization
   grpc::CallbackServerContext* request_context_;
   const SelectAdRequest* request_;
+  AuctionConfig auction_config_;
   std::variant<ProtectedAudienceInput, ProtectedAuctionInput>
       protected_auction_input_;
   SelectAdResponse* response_;
   AuctionResult::Error error_;
   const ClientRegistry& clients_;
   const TrustedServersConfigClient& config_client_;
+  const ReportWinMap& report_win_map_;
   // Scope for current auction (single seller, top level or component)
   const AuctionScope auction_scope_;
+
+  // Contains the status or scoring signals. Since we run scoring signals and
+  // k-anon call in parallel, we use `maybe_scoring_signals_` as a way to store
+  // the scoring signals temporarily till k-anon statuses are also fetched.
+  //
+  // Also, note that scoring signal fetches are optional and might be skipped
+  // altogether based on adtech's configuration.
+  absl::StatusOr<std::unique_ptr<ScoringSignals>> maybe_scoring_signals_;
 
   // Key Value Fetch Result.
   std::unique_ptr<ScoringSignals> scoring_signals_;
@@ -359,6 +440,11 @@ class SelectAdReactor : public grpc::ServerUnaryReactor {
   // may be moved in order to build the response.
   UpdateGroupMap shared_ig_updates_map_;
 
+  // Map of adtech origins (could be both seller or buyers) to the corresponding
+  // DebugReports object for the adtech. DebugReports contains a list of debug
+  // urls and associated metadata to be sent to the client / top-level server.
+  AdtechOriginDebugUrlsMap adtech_origin_debug_urls_map_;
+
   // Benchmarking Logger to benchmark the service
   std::unique_ptr<BenchmarkingLogger> benchmarking_logger_;
 
@@ -368,7 +454,7 @@ class SelectAdReactor : public grpc::ServerUnaryReactor {
   RequestLogContext log_context_;
 
   // Decompressed and decoded buyer inputs.
-  absl::StatusOr<absl::flat_hash_map<absl::string_view, BuyerInput>>
+  absl::StatusOr<absl::flat_hash_map<absl::string_view, BuyerInputForBidding>>
       buyer_inputs_;
 
   // Used to log metric, same life time as reactor.
@@ -394,6 +480,9 @@ class SelectAdReactor : public grpc::ServerUnaryReactor {
   // Indicates whether or not the protected audience support is enabled.
   const bool is_protected_audience_enabled_;
 
+  // Indicates whether or not KV V2 support is enabled.
+  const bool is_tkv_v2_browser_enabled_;
+
   // Is chaffing enabled on the server.
   const bool chaffing_enabled_;
 
@@ -404,14 +493,47 @@ class SelectAdReactor : public grpc::ServerUnaryReactor {
 
   bool enable_enforce_kanon_;
 
+  bool enable_buyer_private_aggregate_reporting_;
+
+  int per_adtech_paapi_contributions_limit_;
   // Pseudo random number generator for use in chaffing.
   std::optional<std::mt19937> generator_;
+
+  bool is_sampled_for_debug_;
+
+  // JSON map of the priority signals supplied by SSP in AuctionConfig.
+  rapidjson::Document priority_signals_vector_;
+
+  // Map of {ig_owner,ig_name} to the interest group index.
+  // This is required to look up the index for handling buyer's
+  // PrivateAggregateContribution.
+  absl::flat_hash_map<InterestGroupIdentity, int> interest_group_index_map_;
+
+  // Maintains k-anon hashes per each bid.
+  // This structure contains hashes as bytes strings which are used to query
+  // the k-anon service.
+  BidKAnonHashSets bid_k_anon_hash_sets_;
+
+  // Maintains hashes that are known to be k-anonymous by the k-anon service.
+  // Hashes are kept as byte strings in this set.
+  absl::flat_hash_set<std::string> queried_k_anon_hashes_;
+
+  // Maps from a pointer to bid to k-anon status of that bid.
+  absl::flat_hash_map<const google::protobuf::Message*, bool>
+      bid_k_anon_status_;
 
  private:
   // Keeps track of how many buyer bids were expected initially and how many
   // were erroneous. If all bids ended up in an error state then that should be
   // flagged as an error eventually.
   AsyncTaskTracker async_task_tracker_;
+
+  absl::string_view k_anon_api_key_;
+
+  bool perform_scoring_signals_fetch_;
+
+  // Tracks the completion of scoring signals fetching and k-anon queries.
+  AsyncTaskTracker fetch_scoring_signals_query_kanon_tracker_;
 
   // Keeps track of the client contexts used for RPC calls
   ClientContexts client_contexts_;
@@ -426,6 +548,9 @@ class SelectAdReactor : public grpc::ServerUnaryReactor {
       const absl::flat_hash_set<absl::string_view>& auction_config_buyer_set);
 
   absl::Time start_ = absl::Now();
+
+  // Should the debug data be exported based on reply from auction
+  bool should_export_debug_ = false;
 };
 }  // namespace privacy_sandbox::bidding_auction_servers
 

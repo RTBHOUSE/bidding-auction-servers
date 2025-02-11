@@ -35,6 +35,8 @@
 #include "services/common/test/utils/ohttp_utils.h"
 #include "services/common/test/utils/service_utils.h"
 #include "services/common/test/utils/test_init.h"
+#include "src/concurrent/event_engine_executor.h"
+#include "src/core/lib/event_engine/default_event_engine.h"
 #include "tools/secure_invoke/flags.h"
 
 using ::privacy_sandbox::bidding_auction_servers::HpkeKeyset;
@@ -71,6 +73,33 @@ constexpr char kSampleGetBidRequest[] = R"JSON({
    "seller" : "https://sellerorigin.com"
 })JSON";
 
+constexpr char kSampleGetBidRequestUsingBuyerInputForBidding[] = R"JSON({
+   "auctionSignals" : "{\"maxFloorCpmUsdMicros\":\"6250\"}",
+   "buyerInputForBidding" : {
+      "interestGroups" : [
+         {
+            "biddingSignalsKeys" : [
+               "1j473877681"
+            ],
+            "browserSignals" : {
+               "bidCount" : "17",
+               "joinCount" : "3",
+               "prevWins" : "[]",
+               "prevWinsMs" : "[]"
+            },
+            "name" : "nike shoe",
+            "userBiddingSignals" : "[[]]"
+         }
+      ]
+   },
+   "buyerSignals" : "[[[[\"Na6y7V9RU0A\",[-0.006591797,0.052001953]]]]]",
+      "logContext" : {
+      "generationId" : "hardcoded-uuid"
+   },
+   "publisherName" : "example.com",
+   "seller" : "https://sellerorigin.com"
+})JSON";
+
 constexpr char kSampleComponentGetBidRequest[] = R"JSON({
    "auctionSignals" : "{\"maxFloorCpmUsdMicros\":\"6250\"}",
    "buyerInput" : {
@@ -83,6 +112,35 @@ constexpr char kSampleComponentGetBidRequest[] = R"JSON({
                "bidCount" : "17",
                "joinCount" : "3",
                "prevWins" : "[]"
+            },
+            "name" : "nike shoe",
+            "userBiddingSignals" : "[[]]"
+         }
+      ]
+   },
+   "buyerSignals" : "[[[[\"Na6y7V9RU0A\",[-0.006591797,0.052001953]]]]]",
+      "logContext" : {
+      "generationId" : "hardcoded-uuid"
+   },
+   "publisherName" : "example.com",
+   "seller" : "https://sellerorigin.com",
+   "top_level_seller": "https://top-level-seller.com"
+})JSON";
+
+constexpr char kSampleComponentGetBidRequestUsingBuyerInputForBidding[] =
+    R"JSON({
+   "auctionSignals" : "{\"maxFloorCpmUsdMicros\":\"6250\"}",
+   "buyerInputForBidding" : {
+      "interestGroups" : [
+         {
+            "biddingSignalsKeys" : [
+               "1j473877681"
+            ],
+            "browserSignals" : {
+               "bidCount" : "17",
+               "joinCount" : "3",
+               "prevWins" : "[]",
+               "prevWinsMs" : "[]"
             },
             "name" : "nike shoe",
             "userBiddingSignals" : "[[]]"
@@ -134,14 +192,17 @@ class SecureInvokeLib : public testing::Test {
     key_fetcher_manager_ = CreateKeyFetcherManager(
         config_client, CreatePublicKeyFetcher(config_client));
 
-    SetupBiddingProviderMock(
-        /*provider=*/*bidding_signals_provider_,
-        /*bidding_signals_value=*/valid_bidding_signals,
-        /*repeated_get_allowed=*/false,
-        /*server_error_to_return=*/std::nullopt,
-        /*match_any_params_any_times=*/true);
+    SetupBiddingProviderMock(*bidding_signals_provider_,
+                             {.bidding_signals_value = valid_bidding_signals,
+                              .match_any_params_any_times = true});
 
     GTEST_FLAG_SET(death_test_style, "threadsafe");
+    stub_ = BuyerFrontEnd::NewStub(
+        CreateChannel(bidding_service_client_config_.server_addr,
+                      bidding_service_client_config_.compression,
+                      bidding_service_client_config_.secure_client,
+                      /*grpc_arg_default_authority=*/"",
+                      bidding_service_client_config_.ca_root_pem));
   }
 
   GetBidsRequest request_;
@@ -152,7 +213,9 @@ class SecureInvokeLib : public testing::Test {
   GetBidsConfig get_bids_config_ = {
       .is_protected_audience_enabled = true,
   };
-  BiddingServiceClientConfig bidding_service_client_config_;
+  BiddingServiceClientConfig bidding_service_client_config_ = {
+      .ca_root_pem = kTestCaCertPath};
+  std::unique_ptr<BuyerFrontEnd::StubInterface> stub_;
   std::unique_ptr<MockAsyncProvider<BiddingSignalsRequest, BiddingSignals>>
       bidding_signals_provider_ = std::make_unique<
           MockAsyncProvider<BiddingSignalsRequest, BiddingSignals>>();
@@ -162,10 +225,16 @@ class SecureInvokeLib : public testing::Test {
 };
 
 TEST_F(SecureInvokeLib, RequestToBfeNeedsClientIp) {
+  auto executor = server_common::EventEngineExecutor(
+      grpc_event_engine::experimental::GetDefaultEventEngine());
   BuyerFrontEndService buyer_front_end_service{
-      std::move(bidding_signals_provider_), bidding_service_client_config_,
-      std::move(key_fetcher_manager_),      std::move(crypto_client_),
-      std::move(kv_async_client_),          get_bids_config_};
+      std::move(bidding_signals_provider_),
+      bidding_service_client_config_,
+      std::move(key_fetcher_manager_),
+      std::move(crypto_client_),
+      std::move(kv_async_client_),
+      get_bids_config_,
+      executor};
 
   auto start_service_result = StartLocalService(&buyer_front_end_service);
   absl::SetFlag(&FLAGS_host_addr,
@@ -175,10 +244,16 @@ TEST_F(SecureInvokeLib, RequestToBfeNeedsClientIp) {
 }
 
 TEST_F(SecureInvokeLib, RequestToBfeNeedsServerAddress) {
+  auto executor = server_common::EventEngineExecutor(
+      grpc_event_engine::experimental::GetDefaultEventEngine());
   BuyerFrontEndService buyer_front_end_service{
-      std::move(bidding_signals_provider_), bidding_service_client_config_,
-      std::move(key_fetcher_manager_),      std::move(crypto_client_),
-      std::move(kv_async_client_),          get_bids_config_};
+      std::move(bidding_signals_provider_),
+      bidding_service_client_config_,
+      std::move(key_fetcher_manager_),
+      std::move(crypto_client_),
+      std::move(kv_async_client_),
+      get_bids_config_,
+      executor};
 
   auto start_service_result = StartLocalService(&buyer_front_end_service);
   EXPECT_DEATH(auto unused = SendRequestToBfe(default_keyset_, false),
@@ -186,10 +261,16 @@ TEST_F(SecureInvokeLib, RequestToBfeNeedsServerAddress) {
 }
 
 TEST_F(SecureInvokeLib, RequestToBfeNeedsUserAgent) {
+  auto executor = server_common::EventEngineExecutor(
+      grpc_event_engine::experimental::GetDefaultEventEngine());
   BuyerFrontEndService buyer_front_end_service{
-      std::move(bidding_signals_provider_), bidding_service_client_config_,
-      std::move(key_fetcher_manager_),      std::move(crypto_client_),
-      std::move(kv_async_client_),          get_bids_config_};
+      std::move(bidding_signals_provider_),
+      bidding_service_client_config_,
+      std::move(key_fetcher_manager_),
+      std::move(crypto_client_),
+      std::move(kv_async_client_),
+      get_bids_config_,
+      executor};
 
   auto start_service_result = StartLocalService(&buyer_front_end_service);
   absl::SetFlag(&FLAGS_host_addr,
@@ -202,10 +283,16 @@ TEST_F(SecureInvokeLib, RequestToBfeNeedsUserAgent) {
 }
 
 TEST_F(SecureInvokeLib, RequestToBfeNeedsAcceptLanguage) {
+  auto executor = server_common::EventEngineExecutor(
+      grpc_event_engine::experimental::GetDefaultEventEngine());
   BuyerFrontEndService buyer_front_end_service{
-      std::move(bidding_signals_provider_), bidding_service_client_config_,
-      std::move(key_fetcher_manager_),      std::move(crypto_client_),
-      std::move(kv_async_client_),          get_bids_config_};
+      std::move(bidding_signals_provider_),
+      bidding_service_client_config_,
+      std::move(key_fetcher_manager_),
+      std::move(crypto_client_),
+      std::move(kv_async_client_),
+      get_bids_config_,
+      executor};
 
   auto start_service_result = StartLocalService(&buyer_front_end_service);
   absl::SetFlag(&FLAGS_host_addr,
@@ -218,10 +305,16 @@ TEST_F(SecureInvokeLib, RequestToBfeNeedsAcceptLanguage) {
 }
 
 TEST_F(SecureInvokeLib, RequestToBfeReturnsAResponse) {
+  auto executor = server_common::EventEngineExecutor(
+      grpc_event_engine::experimental::GetDefaultEventEngine());
   BuyerFrontEndService buyer_front_end_service{
-      std::move(bidding_signals_provider_), bidding_service_client_config_,
-      std::move(key_fetcher_manager_),      std::move(crypto_client_),
-      std::move(kv_async_client_),          get_bids_config_};
+      std::move(bidding_signals_provider_),
+      bidding_service_client_config_,
+      std::move(key_fetcher_manager_),
+      std::move(crypto_client_),
+      std::move(kv_async_client_),
+      get_bids_config_,
+      executor};
 
   auto start_service_result = StartLocalService(&buyer_front_end_service);
   std::unique_ptr<BuyerFrontEnd::StubInterface> stub =
@@ -236,11 +329,44 @@ TEST_F(SecureInvokeLib, RequestToBfeReturnsAResponse) {
   EXPECT_TRUE(status.ok()) << status;
 }
 
-TEST_F(SecureInvokeLib, RequestToBfeReturnsAResponseWithDebugReportingEnabled) {
+TEST_F(SecureInvokeLib,
+       RequestToBfeReturnsAResponse_UsingBuyerInputForBidding) {
+  auto executor = server_common::EventEngineExecutor(
+      grpc_event_engine::experimental::GetDefaultEventEngine());
   BuyerFrontEndService buyer_front_end_service{
-      std::move(bidding_signals_provider_), bidding_service_client_config_,
-      std::move(key_fetcher_manager_),      std::move(crypto_client_),
-      std::move(kv_async_client_),          get_bids_config_};
+      std::move(bidding_signals_provider_),
+      bidding_service_client_config_,
+      std::move(key_fetcher_manager_),
+      std::move(crypto_client_),
+      std::move(kv_async_client_),
+      get_bids_config_,
+      executor};
+
+  auto start_service_result = StartLocalService(&buyer_front_end_service);
+  std::unique_ptr<BuyerFrontEnd::StubInterface> stub =
+      CreateServiceStub<BuyerFrontEnd>(start_service_result.port);
+  SetUpOptionFlags(start_service_result.port);
+  absl::SetFlag(&FLAGS_json_input_str,
+                kSampleGetBidRequestUsingBuyerInputForBidding);
+
+  // Verifies that the encrypted request makes it to BFE and the response comes
+  // back. Empty response is expected because trusted bidding signals for IG
+  // are empty.
+  auto status = SendRequestToBfe(default_keyset_, false, std::move(stub));
+  EXPECT_TRUE(status.ok()) << status;
+}
+
+TEST_F(SecureInvokeLib, RequestToBfeReturnsAResponseWithDebugReportingEnabled) {
+  auto executor = server_common::EventEngineExecutor(
+      grpc_event_engine::experimental::GetDefaultEventEngine());
+  BuyerFrontEndService buyer_front_end_service{
+      std::move(bidding_signals_provider_),
+      bidding_service_client_config_,
+      std::move(key_fetcher_manager_),
+      std::move(crypto_client_),
+      std::move(kv_async_client_),
+      get_bids_config_,
+      executor};
 
   auto start_service_result = StartLocalService(&buyer_front_end_service);
   bool enable_debug_reporting = true;
@@ -258,10 +384,16 @@ TEST_F(SecureInvokeLib, RequestToBfeReturnsAResponseWithDebugReportingEnabled) {
 }
 
 TEST_F(SecureInvokeLib, IncludesTopLevelSellerInBfeInput) {
+  auto executor = server_common::EventEngineExecutor(
+      grpc_event_engine::experimental::GetDefaultEventEngine());
   BuyerFrontEndService buyer_front_end_service{
-      std::move(bidding_signals_provider_), bidding_service_client_config_,
-      std::move(key_fetcher_manager_),      std::move(crypto_client_),
-      std::move(kv_async_client_),          get_bids_config_};
+      std::move(bidding_signals_provider_),
+      bidding_service_client_config_,
+      std::move(key_fetcher_manager_),
+      std::move(crypto_client_),
+      std::move(kv_async_client_),
+      get_bids_config_,
+      executor};
 
   auto start_service_result = StartLocalService(&buyer_front_end_service);
   bool enable_debug_reporting = true;
@@ -278,11 +410,46 @@ TEST_F(SecureInvokeLib, IncludesTopLevelSellerInBfeInput) {
   EXPECT_TRUE(status.ok()) << status;
 }
 
-TEST_F(SecureInvokeLib, RequestToBfeNeedsValidKey) {
+TEST_F(SecureInvokeLib,
+       IncludesTopLevelSellerInBfeInput_UsingBuyerInputForBidding) {
+  auto executor = server_common::EventEngineExecutor(
+      grpc_event_engine::experimental::GetDefaultEventEngine());
   BuyerFrontEndService buyer_front_end_service{
-      std::move(bidding_signals_provider_), bidding_service_client_config_,
-      std::move(key_fetcher_manager_),      std::move(crypto_client_),
-      std::move(kv_async_client_),          get_bids_config_};
+      std::move(bidding_signals_provider_),
+      bidding_service_client_config_,
+      std::move(key_fetcher_manager_),
+      std::move(crypto_client_),
+      std::move(kv_async_client_),
+      get_bids_config_,
+      executor};
+
+  auto start_service_result = StartLocalService(&buyer_front_end_service);
+  bool enable_debug_reporting = true;
+  std::unique_ptr<BuyerFrontEnd::StubInterface> stub =
+      CreateServiceStub<BuyerFrontEnd>(start_service_result.port);
+  SetUpOptionFlags(start_service_result.port);
+  absl::SetFlag(&FLAGS_json_input_str,
+                kSampleComponentGetBidRequestUsingBuyerInputForBidding);
+
+  // Verifies that the encrypted request makes it to BFE and the response comes
+  // back. Empty response is expected because trusted bidding signals for IG
+  // are empty.
+  auto status = SendRequestToBfe(default_keyset_, enable_debug_reporting,
+                                 std::move(stub));
+  EXPECT_TRUE(status.ok()) << status;
+}
+
+TEST_F(SecureInvokeLib, RequestToBfeNeedsValidKey) {
+  auto executor = server_common::EventEngineExecutor(
+      grpc_event_engine::experimental::GetDefaultEventEngine());
+  BuyerFrontEndService buyer_front_end_service{
+      std::move(bidding_signals_provider_),
+      bidding_service_client_config_,
+      std::move(key_fetcher_manager_),
+      std::move(crypto_client_),
+      std::move(kv_async_client_),
+      get_bids_config_,
+      executor};
 
   auto start_service_result = StartLocalService(&buyer_front_end_service);
   std::unique_ptr<BuyerFrontEnd::StubInterface> stub =
@@ -301,10 +468,16 @@ TEST_F(SecureInvokeLib, RequestToBfeNeedsValidKey) {
 }
 
 TEST_F(SecureInvokeLib, UsesKeyForBfeEncryption) {
+  auto executor = server_common::EventEngineExecutor(
+      grpc_event_engine::experimental::GetDefaultEventEngine());
   BuyerFrontEndService buyer_front_end_service{
-      std::move(bidding_signals_provider_), bidding_service_client_config_,
-      std::move(key_fetcher_manager_),      std::move(crypto_client_),
-      std::move(kv_async_client_),          get_bids_config_};
+      std::move(bidding_signals_provider_),
+      bidding_service_client_config_,
+      std::move(key_fetcher_manager_),
+      std::move(crypto_client_),
+      std::move(kv_async_client_),
+      get_bids_config_,
+      executor};
 
   auto start_service_result = StartLocalService(&buyer_front_end_service);
   std::unique_ptr<BuyerFrontEnd::StubInterface> stub =

@@ -42,6 +42,7 @@
 #include "services/common/metric/server_definition.h"
 #include "services/common/test/mocks.h"
 #include "services/common/test/utils/service_utils.h"
+#include "services/common/test/utils/test_init.h"
 #include "services/common/test/utils/test_utils.h"
 #include "src/encryption/key_fetcher/mock/mock_key_fetcher_manager.h"
 
@@ -168,16 +169,16 @@ ClientRegistry CreateClientRegistry(
           .kv_async_client = std::move(kv_async_client)};
 }
 
-GetBidsConfig CreateGetBidsConfig(bool is_tkv_v2_enabled = false) {
+GetBidsConfig CreateDefaultGetBidsConfig() {
   return {.protected_app_signals_generate_bid_timeout_ms = 60000,
           .is_protected_app_signals_enabled = true,
-          .is_protected_audience_enabled = true,
-          .is_tkv_v2_enabled = is_tkv_v2_enabled};
+          .is_protected_audience_enabled = true};
 }
 
 class BuyerFrontEndServiceTest : public ::testing::Test {
  protected:
   void SetUp() override {
+    CommonTestInit();
     server_common::telemetry::TelemetryConfig config_proto;
     config_proto.set_mode(server_common::telemetry::TelemetryConfig::PROD);
     metric::MetricContextMap<GetBidsRequest>(
@@ -190,6 +191,7 @@ class BuyerFrontEndServiceTest : public ::testing::Test {
   grpc::ClientContext client_context_;
   GetBidsRequest request_;
   GetBidsResponse response_;
+  MockExecutor executor_;
 };
 
 std::unique_ptr<BiddingAsyncClientMock> GetValidBiddingAsyncClientMock() {
@@ -249,9 +251,7 @@ GetValidProtectedAppSignalsBiddingClientMock() {
 TEST_F(BuyerFrontEndServiceTest,
        ProtectedAudienceAndProtectedAppSignalsBidsFetched) {
   auto bidding_signals_async_provider = SetupBiddingProviderMock(
-      /*bidding_signals_value=*/valid_bidding_signals,
-      /*repeated_get_allowed=*/false,
-      /*server_error_to_return=*/std::nullopt);
+      {.bidding_signals_value = valid_bidding_signals});
   auto bidding_async_client = GetValidBiddingAsyncClientMock();
   auto protected_app_signals_bidding_async_client =
       GetValidProtectedAppSignalsBiddingClientMock();
@@ -261,7 +261,7 @@ TEST_F(BuyerFrontEndServiceTest,
           std::move(bidding_signals_async_provider),
           std::move(bidding_async_client),
           std::move(protected_app_signals_bidding_async_client)),
-      CreateGetBidsConfig());
+      CreateDefaultGetBidsConfig(), executor_);
   request_ = CreateGetBidsRequest(/*add_protected_signals_input=*/true,
                                   /*add_protected_audience_input=*/true);
   auto start_bfe_result = StartLocalService(&buyer_frontend_service);
@@ -290,15 +290,53 @@ TEST_F(BuyerFrontEndServiceTest,
   auto protected_app_signals_bidding_async_client =
       GetValidProtectedAppSignalsBiddingClientMock();
 
+  GetBidsConfig config = CreateDefaultGetBidsConfig();
+  config.is_tkv_v2_browser_enabled = true;
   BuyerFrontEndService buyer_frontend_service(
       CreateClientRegistry(
           /*bidding_signals_async_provider=*/nullptr,
           std::move(bidding_async_client),
           std::move(protected_app_signals_bidding_async_client),
           std::move(kv_async_client)),
-      CreateGetBidsConfig(/*is_tkv_v2_enabled=*/true));
+      config, executor_);
   request_ = CreateGetBidsRequest(/*add_protected_signals_input=*/true,
                                   /*add_protected_audience_input=*/true);
+  auto start_bfe_result = StartLocalService(&buyer_frontend_service);
+  auto stub = CreateServiceStub<BuyerFrontEnd>(start_bfe_result.port);
+  grpc::Status status = stub->GetBids(&client_context_, request_, &response_);
+
+  ASSERT_TRUE(status.ok()) << server_common::ToAbslStatus(status);
+  GetBidsResponse::GetBidsRawResponse raw_response;
+  ASSERT_TRUE(raw_response.ParseFromString(response_.response_ciphertext()));
+  EXPECT_EQ(raw_response.bids_size(), 1);
+  EXPECT_EQ(raw_response.protected_app_signals_bids_size(), 1);
+}
+
+TEST_F(BuyerFrontEndServiceTest,
+       ProtectedAudienceAndProtectedAppSignalsBidsFetchedAndroidV2) {
+  std::unique_ptr<KVAsyncClientMock> kv_async_client =
+      std::make_unique<KVAsyncClientMock>();
+  kv_server::v2::GetValuesResponse response;
+  ASSERT_TRUE(TextFormat::ParseFromString(
+      absl::StrFormat(compression_group_wrapper,
+                      absl::CEscape(RemoveWhiteSpaces(compression_group))),
+      &response));
+  SetupBiddingProviderMockV2(kv_async_client.get(), response);
+
+  auto bidding_async_client = GetValidBiddingAsyncClientMock();
+  auto protected_app_signals_bidding_async_client =
+      GetValidProtectedAppSignalsBiddingClientMock();
+
+  BuyerFrontEndService buyer_frontend_service(
+      CreateClientRegistry(
+          /*bidding_signals_async_provider=*/nullptr,
+          std::move(bidding_async_client),
+          std::move(protected_app_signals_bidding_async_client),
+          std::move(kv_async_client)),
+      CreateDefaultGetBidsConfig(), executor_);
+  request_ = CreateGetBidsRequest(/*add_protected_signals_input=*/true,
+                                  /*add_protected_audience_input=*/true,
+                                  ClientType::CLIENT_TYPE_ANDROID);
   auto start_bfe_result = StartLocalService(&buyer_frontend_service);
   auto stub = CreateServiceStub<BuyerFrontEnd>(start_bfe_result.port);
   grpc::Status status = stub->GetBids(&client_context_, request_, &response_);
@@ -313,10 +351,7 @@ TEST_F(BuyerFrontEndServiceTest,
 TEST_F(
     BuyerFrontEndServiceTest,
     NoProtectedAudienceButSomeProtectedAppSignalsBidsFetchedForEmptySignals) {
-  auto bidding_signals_async_provider = SetupBiddingProviderMock(
-      /*bidding_signals_value=*/"",
-      /*repeated_get_allowed=*/false,
-      /*server_error_to_return=*/std::nullopt);
+  auto bidding_signals_async_provider = SetupBiddingProviderMock();
   auto bidding_async_client = std::make_unique<BiddingAsyncClientMock>();
   // We never expect the Bidding client to be called; this call should be
   // skipped for lack of trusted bidding signals.
@@ -329,7 +364,7 @@ TEST_F(
           std::move(bidding_signals_async_provider),
           std::move(bidding_async_client),
           std::move(protected_app_signals_bidding_async_client)),
-      CreateGetBidsConfig());
+      CreateDefaultGetBidsConfig(), executor_);
   request_ = CreateGetBidsRequest(/*add_protected_signals_input=*/true,
                                   /*add_protected_audience_input=*/true);
   auto start_bfe_result = StartLocalService(&buyer_frontend_service);
@@ -357,13 +392,15 @@ TEST_F(
   EXPECT_CALL(*bidding_async_client, ExecuteInternal).Times(0);
   auto protected_app_signals_bidding_async_client =
       GetValidProtectedAppSignalsBiddingClientMock();
+  GetBidsConfig config = CreateDefaultGetBidsConfig();
+  config.is_tkv_v2_browser_enabled = true;
   BuyerFrontEndService buyer_frontend_service(
       CreateClientRegistry(
           /*bidding_signals_async_provider=*/nullptr,
           std::move(bidding_async_client),
           std::move(protected_app_signals_bidding_async_client),
           std::move(kv_async_client)),
-      CreateGetBidsConfig(/*is_tkv_v2_enabled=*/true));
+      config, executor_);
   request_ = CreateGetBidsRequest(/*add_protected_signals_input=*/true,
                                   /*add_protected_audience_input=*/true);
   auto start_bfe_result = StartLocalService(&buyer_frontend_service);
@@ -417,7 +454,7 @@ TEST_F(BuyerFrontEndServiceTest,
           std::move(bidding_signals_async_provider),
           std::move(bidding_async_client),
           std::move(protected_app_signals_bidding_async_client)),
-      CreateGetBidsConfig());
+      CreateDefaultGetBidsConfig(), executor_);
   request_ = CreateGetBidsRequest(/*add_protected_signals_input=*/true,
                                   /*add_protected_audience_input=*/true);
   auto start_bfe_result = StartLocalService(&buyer_frontend_service);
@@ -459,13 +496,15 @@ TEST_F(BuyerFrontEndServiceTest,
   auto bidding_async_client = GetValidBiddingAsyncClientMockNotCalled();
   auto protected_app_signals_bidding_async_client =
       GetValidProtectedAppSignalsBiddingClientMock();
+  GetBidsConfig config = CreateDefaultGetBidsConfig();
+  config.is_tkv_v2_browser_enabled = true;
   BuyerFrontEndService buyer_frontend_service(
       CreateClientRegistry(
           /*bidding_signals_async_provider=*/nullptr,
           std::move(bidding_async_client),
           std::move(protected_app_signals_bidding_async_client),
           std::move(kv_async_client)),
-      CreateGetBidsConfig(/*is_tkv_v2_enabled=*/true));
+      config, executor_);
 
   request_ = CreateGetBidsRequest(/*add_protected_signals_input=*/true,
                                   /*add_protected_audience_input=*/true);
@@ -507,9 +546,7 @@ std::unique_ptr<BiddingAsyncClientMock> GetErrorBiddingAsyncClientMock() {
 TEST_F(BuyerFrontEndServiceTest,
        ProtectedAudienceBiddingErrorButProtectedAppSignalsBidsFetched) {
   auto bidding_signals_async_provider = SetupBiddingProviderMock(
-      /*bidding_signals_value=*/valid_bidding_signals,
-      /*repeated_get_allowed=*/false,
-      /*server_error_to_return=*/std::nullopt);
+      {.bidding_signals_value = valid_bidding_signals});
   auto bidding_async_client = GetErrorBiddingAsyncClientMock();
   auto protected_app_signals_bidding_async_client =
       GetValidProtectedAppSignalsBiddingClientMock();
@@ -519,7 +556,7 @@ TEST_F(BuyerFrontEndServiceTest,
           std::move(bidding_signals_async_provider),
           std::move(bidding_async_client),
           std::move(protected_app_signals_bidding_async_client)),
-      CreateGetBidsConfig());
+      CreateDefaultGetBidsConfig(), executor_);
   request_ = CreateGetBidsRequest(/*add_protected_signals_input=*/true,
                                   /*add_protected_audience_input=*/true);
   auto start_bfe_result = StartLocalService(&buyer_frontend_service);
@@ -546,13 +583,15 @@ TEST_F(BuyerFrontEndServiceTest,
   auto bidding_async_client = GetErrorBiddingAsyncClientMock();
   auto protected_app_signals_bidding_async_client =
       GetValidProtectedAppSignalsBiddingClientMock();
+  GetBidsConfig config = CreateDefaultGetBidsConfig();
+  config.is_tkv_v2_browser_enabled = true;
   BuyerFrontEndService buyer_frontend_service(
       CreateClientRegistry(
           /*bidding_signals_async_provider=*/nullptr,
           std::move(bidding_async_client),
           std::move(protected_app_signals_bidding_async_client),
           std::move(kv_async_client)),
-      CreateGetBidsConfig(/*is_tkv_v2_enabled=*/true));
+      config, executor_);
   request_ = CreateGetBidsRequest(/*add_protected_signals_input=*/true,
                                   /*add_protected_audience_input=*/true);
   auto start_bfe_result = StartLocalService(&buyer_frontend_service);
@@ -595,9 +634,7 @@ GetErrorProtectedAppSignalsBiddingClientMock() {
 TEST_F(BuyerFrontEndServiceTest,
        ProtectedAudienceBidFetchedButProtectedAppSignalsBidsErrored) {
   auto bidding_signals_async_provider = SetupBiddingProviderMock(
-      /*bidding_signals_value=*/valid_bidding_signals,
-      /*repeated_get_allowed=*/false,
-      /*server_error_to_return=*/std::nullopt);
+      {.bidding_signals_value = valid_bidding_signals});
   auto bidding_async_client = GetValidBiddingAsyncClientMock();
   auto protected_app_signals_bidding_async_client =
       GetErrorProtectedAppSignalsBiddingClientMock();
@@ -607,7 +644,7 @@ TEST_F(BuyerFrontEndServiceTest,
           std::move(bidding_signals_async_provider),
           std::move(bidding_async_client),
           std::move(protected_app_signals_bidding_async_client)),
-      CreateGetBidsConfig());
+      CreateDefaultGetBidsConfig(), executor_);
   request_ = CreateGetBidsRequest(/*add_protected_signals_input=*/true,
                                   /*add_protected_audience_input=*/true);
   auto start_bfe_result = StartLocalService(&buyer_frontend_service);
@@ -634,13 +671,15 @@ TEST_F(BuyerFrontEndServiceTest,
   auto bidding_async_client = GetValidBiddingAsyncClientMock();
   auto protected_app_signals_bidding_async_client =
       GetErrorProtectedAppSignalsBiddingClientMock();
+  GetBidsConfig config = CreateDefaultGetBidsConfig();
+  config.is_tkv_v2_browser_enabled = true;
   BuyerFrontEndService buyer_frontend_service(
       CreateClientRegistry(
           /*bidding_signals_async_provider=*/nullptr,
           std::move(bidding_async_client),
           std::move(protected_app_signals_bidding_async_client),
           std::move(kv_async_client)),
-      CreateGetBidsConfig(/*is_tkv_v2_enabled=*/true));
+      config, executor_);
   request_ = CreateGetBidsRequest(/*add_protected_signals_input=*/true,
                                   /*add_protected_audience_input=*/true);
   auto start_bfe_result = StartLocalService(&buyer_frontend_service);
@@ -680,9 +719,7 @@ std::unique_ptr<BiddingAsyncClientMock> GetEmptyBiddingAsyncClientMock() {
 TEST_F(BuyerFrontEndServiceTest,
        ProtectedAudienceBidEmptyButProtectedAppSignalsBidsFetched) {
   auto bidding_signals_async_provider = SetupBiddingProviderMock(
-      /*bidding_signals_value=*/valid_bidding_signals,
-      /*repeated_get_allowed=*/false,
-      /*server_error_to_return=*/std::nullopt);
+      {.bidding_signals_value = valid_bidding_signals});
   auto bidding_async_client = GetEmptyBiddingAsyncClientMock();
   auto protected_app_signals_bidding_async_client =
       GetValidProtectedAppSignalsBiddingClientMock();
@@ -692,7 +729,7 @@ TEST_F(BuyerFrontEndServiceTest,
           std::move(bidding_signals_async_provider),
           std::move(bidding_async_client),
           std::move(protected_app_signals_bidding_async_client)),
-      CreateGetBidsConfig());
+      CreateDefaultGetBidsConfig(), executor_);
   request_ = CreateGetBidsRequest(/*add_protected_signals_input=*/true,
                                   /*add_protected_audience_input=*/true);
   auto start_bfe_result = StartLocalService(&buyer_frontend_service);
@@ -719,13 +756,15 @@ TEST_F(BuyerFrontEndServiceTest,
   auto bidding_async_client = GetEmptyBiddingAsyncClientMock();
   auto protected_app_signals_bidding_async_client =
       GetValidProtectedAppSignalsBiddingClientMock();
+  GetBidsConfig config = CreateDefaultGetBidsConfig();
+  config.is_tkv_v2_browser_enabled = true;
   BuyerFrontEndService buyer_frontend_service(
       CreateClientRegistry(
           /*bidding_signals_async_provider=*/nullptr,
           std::move(bidding_async_client),
           std::move(protected_app_signals_bidding_async_client),
           std::move(kv_async_client)),
-      CreateGetBidsConfig(/*is_tkv_v2_enabled=*/true));
+      config, executor_);
   request_ = CreateGetBidsRequest(/*add_protected_signals_input=*/true,
                                   /*add_protected_audience_input=*/true);
   auto start_bfe_result = StartLocalService(&buyer_frontend_service);
@@ -768,9 +807,7 @@ GetEmptyProtectedAppSignalsBiddingClientMock() {
 TEST_F(BuyerFrontEndServiceTest,
        ProtectedAudienceBidFetchedButProtectedAppSignalsBidsEmpty) {
   auto bidding_signals_async_provider = SetupBiddingProviderMock(
-      /*bidding_signals_value=*/valid_bidding_signals,
-      /*repeated_get_allowed=*/false,
-      /*server_error_to_return=*/std::nullopt);
+      {.bidding_signals_value = valid_bidding_signals});
   auto bidding_async_client = GetValidBiddingAsyncClientMock();
   auto protected_app_signals_bidding_async_client =
       GetEmptyProtectedAppSignalsBiddingClientMock();
@@ -780,7 +817,7 @@ TEST_F(BuyerFrontEndServiceTest,
           std::move(bidding_signals_async_provider),
           std::move(bidding_async_client),
           std::move(protected_app_signals_bidding_async_client)),
-      CreateGetBidsConfig());
+      CreateDefaultGetBidsConfig(), executor_);
   request_ = CreateGetBidsRequest(/*add_protected_signals_input=*/true,
                                   /*add_protected_audience_input=*/true);
   auto start_bfe_result = StartLocalService(&buyer_frontend_service);
@@ -807,13 +844,15 @@ TEST_F(BuyerFrontEndServiceTest,
   auto bidding_async_client = GetValidBiddingAsyncClientMock();
   auto protected_app_signals_bidding_async_client =
       GetEmptyProtectedAppSignalsBiddingClientMock();
+  GetBidsConfig config = CreateDefaultGetBidsConfig();
+  config.is_tkv_v2_browser_enabled = true;
   BuyerFrontEndService buyer_frontend_service(
       CreateClientRegistry(
           /*bidding_signals_async_provider=*/nullptr,
           std::move(bidding_async_client),
           std::move(protected_app_signals_bidding_async_client),
           std::move(kv_async_client)),
-      CreateGetBidsConfig(/*is_tkv_v2_enabled=*/true));
+      config, executor_);
   request_ = CreateGetBidsRequest(/*add_protected_signals_input=*/true,
                                   /*add_protected_audience_input=*/true);
   auto start_bfe_result = StartLocalService(&buyer_frontend_service);
@@ -830,9 +869,7 @@ TEST_F(BuyerFrontEndServiceTest,
 TEST_F(BuyerFrontEndServiceTest,
        BothProtectedAudienceBidAndProtectedAppSignalsBidsEmptyIsOk) {
   auto bidding_signals_async_provider = SetupBiddingProviderMock(
-      /*bidding_signals_value=*/valid_bidding_signals,
-      /*repeated_get_allowed=*/false,
-      /*server_error_to_return=*/std::nullopt);
+      {.bidding_signals_value = valid_bidding_signals});
   auto bidding_async_client = GetEmptyBiddingAsyncClientMock();
   auto protected_app_signals_bidding_async_client =
       GetEmptyProtectedAppSignalsBiddingClientMock();
@@ -842,7 +879,7 @@ TEST_F(BuyerFrontEndServiceTest,
           std::move(bidding_signals_async_provider),
           std::move(bidding_async_client),
           std::move(protected_app_signals_bidding_async_client)),
-      CreateGetBidsConfig());
+      CreateDefaultGetBidsConfig(), executor_);
   request_ = CreateGetBidsRequest(/*add_protected_signals_input=*/true,
                                   /*add_protected_audience_input=*/true);
   auto start_bfe_result = StartLocalService(&buyer_frontend_service);
@@ -869,14 +906,15 @@ TEST_F(BuyerFrontEndServiceTest,
   auto bidding_async_client = GetEmptyBiddingAsyncClientMock();
   auto protected_app_signals_bidding_async_client =
       GetEmptyProtectedAppSignalsBiddingClientMock();
-
+  GetBidsConfig config = CreateDefaultGetBidsConfig();
+  config.is_tkv_v2_browser_enabled = true;
   BuyerFrontEndService buyer_frontend_service(
       CreateClientRegistry(
           /*bidding_signals_async_provider=*/nullptr,
           std::move(bidding_async_client),
           std::move(protected_app_signals_bidding_async_client),
           std::move(kv_async_client)),
-      CreateGetBidsConfig(/*is_tkv_v2_enabled=*/true));
+      config, executor_);
   request_ = CreateGetBidsRequest(/*add_protected_signals_input=*/true,
                                   /*add_protected_audience_input=*/true);
   auto start_bfe_result = StartLocalService(&buyer_frontend_service);
@@ -894,9 +932,7 @@ TEST_F(
     BuyerFrontEndServiceTest,
     ProtectedAudienceBidErrorAndProtectedAppSignalsBidErrorMeansOverallError) {
   auto bidding_signals_async_provider = SetupBiddingProviderMock(
-      /*bidding_signals_value=*/valid_bidding_signals,
-      /*repeated_get_allowed=*/false,
-      /*server_error_to_return=*/std::nullopt);
+      {.bidding_signals_value = valid_bidding_signals});
   auto bidding_async_client = GetErrorBiddingAsyncClientMock();
   auto protected_app_signals_bidding_async_client =
       GetErrorProtectedAppSignalsBiddingClientMock();
@@ -906,7 +942,7 @@ TEST_F(
           std::move(bidding_signals_async_provider),
           std::move(bidding_async_client),
           std::move(protected_app_signals_bidding_async_client)),
-      CreateGetBidsConfig());
+      CreateDefaultGetBidsConfig(), executor_);
   request_ = CreateGetBidsRequest(/*add_protected_signals_input=*/true,
                                   /*add_protected_audience_input=*/true);
   auto start_bfe_result = StartLocalService(&buyer_frontend_service);
@@ -937,14 +973,15 @@ TEST_F(BuyerFrontEndServiceTest,
   auto bidding_async_client = GetErrorBiddingAsyncClientMock();
   auto protected_app_signals_bidding_async_client =
       GetErrorProtectedAppSignalsBiddingClientMock();
-
+  GetBidsConfig config = CreateDefaultGetBidsConfig();
+  config.is_tkv_v2_browser_enabled = true;
   BuyerFrontEndService buyer_frontend_service(
       CreateClientRegistry(
           /*bidding_signals_async_provider=*/nullptr,
           std::move(bidding_async_client),
           std::move(protected_app_signals_bidding_async_client),
           std::move(kv_async_client)),
-      CreateGetBidsConfig(/*is_tkv_v2_enabled=*/true));
+      config, executor_);
   request_ = CreateGetBidsRequest(/*add_protected_signals_input=*/true,
                                   /*add_protected_audience_input=*/true);
   auto start_bfe_result = StartLocalService(&buyer_frontend_service);
@@ -974,9 +1011,7 @@ GetProtectedAppSignalsBiddingClientMockThatWillNotBeCalled() {
 TEST_F(BuyerFrontEndServiceTest,
        RPCFinishesEvenWhenProtectedAppSignalsAreNotProvided) {
   auto bidding_signals_async_provider = SetupBiddingProviderMock(
-      /*bidding_signals_value=*/valid_bidding_signals,
-      /*repeated_get_allowed=*/false,
-      /*server_error_to_return=*/std::nullopt);
+      {.bidding_signals_value = valid_bidding_signals});
   auto bidding_async_client = GetValidBiddingAsyncClientMock();
   auto protected_app_signals_bidding_async_client =
       GetProtectedAppSignalsBiddingClientMockThatWillNotBeCalled();
@@ -986,7 +1021,7 @@ TEST_F(BuyerFrontEndServiceTest,
           std::move(bidding_signals_async_provider),
           std::move(bidding_async_client),
           std::move(protected_app_signals_bidding_async_client)),
-      CreateGetBidsConfig());
+      CreateDefaultGetBidsConfig(), executor_);
   request_ = CreateGetBidsRequest(/*add_protected_signals_input=*/false,
                                   /*add_protected_audience_input=*/true);
   auto start_bfe_result = StartLocalService(&buyer_frontend_service);
@@ -1013,14 +1048,15 @@ TEST_F(BuyerFrontEndServiceTest,
   auto bidding_async_client = GetValidBiddingAsyncClientMock();
   auto protected_app_signals_bidding_async_client =
       GetProtectedAppSignalsBiddingClientMockThatWillNotBeCalled();
-
+  GetBidsConfig config = CreateDefaultGetBidsConfig();
+  config.is_tkv_v2_browser_enabled = true;
   BuyerFrontEndService buyer_frontend_service(
       CreateClientRegistry(
           /*bidding_signals_async_provider=*/nullptr,
           std::move(bidding_async_client),
           std::move(protected_app_signals_bidding_async_client),
           std::move(kv_async_client)),
-      CreateGetBidsConfig(/*is_tkv_v2_enabled=*/true));
+      config, executor_);
   request_ = CreateGetBidsRequest(/*add_protected_signals_input=*/false,
                                   /*add_protected_audience_input=*/true);
   auto start_bfe_result = StartLocalService(&buyer_frontend_service);
@@ -1049,12 +1085,9 @@ TEST_F(BuyerFrontEndServiceTest,
           std::move(bidding_signals_async_provider),
           std::move(bidding_async_client),
           std::move(protected_app_signals_bidding_async_client)),
-      CreateGetBidsConfig());
-  request_ = CreateGetBidsRequest(
-      /*add_protectRPCErrorsWhenProtectedAppSignals
-        AndProtectedAudienceNotProvideded_signals_input=*/
-      false,
-      /*add_protected_audience_input=*/false);
+      CreateDefaultGetBidsConfig(), executor_);
+  request_ = CreateGetBidsRequest(/*add_protected_signals_input=*/false,
+                                  /*add_protected_audience_input=*/false);
   auto start_bfe_result = StartLocalService(&buyer_frontend_service);
   auto stub = CreateServiceStub<BuyerFrontEnd>(start_bfe_result.port);
   grpc::Status status = stub->GetBids(&client_context_, request_, &response_);
@@ -1072,18 +1105,17 @@ TEST_F(BuyerFrontEndServiceTest,
   EXPECT_CALL(*bidding_async_client, ExecuteInternal).Times(0);
   auto protected_app_signals_bidding_async_client =
       GetProtectedAppSignalsBiddingClientMockThatWillNotBeCalled();
+  GetBidsConfig config = CreateDefaultGetBidsConfig();
+  config.is_tkv_v2_browser_enabled = true;
   BuyerFrontEndService buyer_frontend_service(
       CreateClientRegistry(
           /*bidding_signals_async_provider=*/nullptr,
           std::move(bidding_async_client),
           std::move(protected_app_signals_bidding_async_client),
           std::move(kv_async_client)),
-      CreateGetBidsConfig(/*is_tkv_v2_enabled=*/true));
-  request_ = CreateGetBidsRequest(
-      /*add_protectRPCErrorsWhenProtectedAppSign
-      alsAndProtectedAudienceNotProvideded_signals_input=*/
-      false,
-      /*add_protected_audience_input=*/false);
+      config, executor_);
+  request_ = CreateGetBidsRequest(/*add_protected_signals_input=*/false,
+                                  /*add_protected_audience_input=*/false);
   auto start_bfe_result = StartLocalService(&buyer_frontend_service);
   auto stub = CreateServiceStub<BuyerFrontEnd>(start_bfe_result.port);
   grpc::Status status = stub->GetBids(&client_context_, request_, &response_);
@@ -1101,14 +1133,14 @@ TEST_F(BuyerFrontEndServiceTest,
   EXPECT_CALL(*bidding_async_client, ExecuteInternal).Times(0);
   auto protected_app_signals_bidding_async_client =
       GetProtectedAppSignalsBiddingClientMockThatWillNotBeCalled();
-  GetBidsConfig config = CreateGetBidsConfig();
+  GetBidsConfig config = CreateDefaultGetBidsConfig();
   config.is_chaffing_enabled = true;
   BuyerFrontEndService buyer_frontend_service(
       CreateClientRegistry(
           std::move(bidding_signals_async_provider),
           std::move(bidding_async_client),
           std::move(protected_app_signals_bidding_async_client)),
-      config);
+      config, executor_);
   GetBidsRequest::GetBidsRawRequest raw_request;
   raw_request.set_is_chaff(true);
   raw_request.mutable_log_context()->set_generation_id(kTestGenerationId);
@@ -1137,15 +1169,16 @@ TEST_F(BuyerFrontEndServiceTest,
   EXPECT_CALL(*bidding_async_client, ExecuteInternal).Times(0);
   auto protected_app_signals_bidding_async_client =
       GetProtectedAppSignalsBiddingClientMockThatWillNotBeCalled();
-  GetBidsConfig config = CreateGetBidsConfig();
+  GetBidsConfig config = CreateDefaultGetBidsConfig();
   config.is_chaffing_enabled = true;
+  config.is_tkv_v2_browser_enabled = true;
   BuyerFrontEndService buyer_frontend_service(
       CreateClientRegistry(
           /*bidding_signals_async_provider=*/nullptr,
           std::move(bidding_async_client),
           std::move(protected_app_signals_bidding_async_client),
           std::move(kv_async_client)),
-      CreateGetBidsConfig(/*is_tkv_v2_enabled=*/true));
+      config, executor_);
 
   GetBidsRequest::GetBidsRawRequest raw_request;
   raw_request.set_is_chaff(true);

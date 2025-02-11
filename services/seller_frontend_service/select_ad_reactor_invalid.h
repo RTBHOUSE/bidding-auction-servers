@@ -23,6 +23,7 @@
 
 #include "absl/status/statusor.h"
 #include "include/grpcpp/impl/codegen/server_callback.h"
+#include "services/seller_frontend_service/report_win_map.h"
 #include "services/seller_frontend_service/select_ad_reactor.h"
 
 namespace privacy_sandbox::bidding_auction_servers {
@@ -34,7 +35,8 @@ class SelectAdReactorInvalid : public SelectAdReactor {
   explicit SelectAdReactorInvalid(
       grpc::CallbackServerContext* context, const SelectAdRequest* request,
       SelectAdResponse* response, const ClientRegistry& clients,
-      const TrustedServersConfigClient& config_client);
+      const TrustedServersConfigClient& config_client,
+      const ReportWinMap& report_win_map);
   virtual ~SelectAdReactorInvalid() = default;
 
   // SelectAdReactorInvalid is neither copyable nor movable.
@@ -46,7 +48,9 @@ class SelectAdReactorInvalid : public SelectAdReactor {
  private:
   absl::StatusOr<std::string> GetNonEncryptedResponse(
       const std::optional<ScoreAdsResponse::AdScore>& high_score,
-      const std::optional<AuctionResult::Error>& error) override;
+      const std::optional<AuctionResult::Error>& error,
+      const AdScores* ghost_winning_scores = nullptr,
+      int per_adtech_paapi_contributions_limit = 0) override;
 
   [[deprecated]] ProtectedAudienceInput GetDecodedProtectedAudienceInput(
       absl::string_view encoded_data) override;
@@ -54,9 +58,14 @@ class SelectAdReactorInvalid : public SelectAdReactor {
   ProtectedAuctionInput GetDecodedProtectedAuctionInput(
       absl::string_view encoded_data) override;
 
-  absl::flat_hash_map<absl::string_view, BuyerInput> GetDecodedBuyerinputs(
-      const google::protobuf::Map<std::string, std::string>&
-          encoded_buyer_inputs) override;
+  absl::flat_hash_map<absl::string_view, BuyerInputForBidding>
+  GetDecodedBuyerinputs(const google::protobuf::Map<std::string, std::string>&
+                            encoded_buyer_inputs) override;
+
+  KAnonJoinCandidate GetKAnonJoinCandidate(
+      const ScoreAdsResponse::AdScore& score) override;
+
+  absl::string_view GetKAnonSetType() override;
 
   ClientType client_type_;
 };

@@ -13,23 +13,13 @@ python_deps()
 
 python_register_toolchains("//builders/bazel")
 
-# TODO: Remove bazel_clang_tidy once we sync to the common repo commit 9edb0c3 (4/3/2024) or later
-http_archive(
-    name = "bazel_clang_tidy",
-    sha256 = "352aeb57ad7ed53ff6e02344885de426421fb6fd7a3890b04d14768d759eb598",
-    strip_prefix = "bazel_clang_tidy-4884c32e09c1ea9ac96b3f08c3004f3ac4c3fe39",
-    urls = [
-        "https://github.com/erenon/bazel_clang_tidy/archive/4884c32e09c1ea9ac96b3f08c3004f3ac4c3fe39.zip",
-    ],
-)
-
 http_archive(
     name = "google_privacysandbox_servers_common",
-    # 2024-10-09
-    sha256 = "7a0337420161304c7429c727b1f82394bc27e1e2586d2da30e6d6100ba92b437",
-    strip_prefix = "data-plane-shared-libraries-158593616a63df924af1cb689f3915b8d32e9db1",
+    # 2025-02-10
+    sha256 = "ae91cd49c679f71346b6123768ff753234fc010c0dfce2847d6f3e4d6fa09ec9",
+    strip_prefix = "data-plane-shared-libraries-4e138f8c8b0204cf525660e53177ac5be5519dd1",
     urls = [
-        "https://github.com/privacysandbox/data-plane-shared-libraries/archive/158593616a63df924af1cb689f3915b8d32e9db1.zip",
+        "https://github.com/privacysandbox/data-plane-shared-libraries/archive/4e138f8c8b0204cf525660e53177ac5be5519dd1.zip",
     ],
 )
 
@@ -129,6 +119,17 @@ local_repository(
     path = "services/inference_sidecar/modules/tensorflow_v2_14_0",
 )
 
+load("@rules_python//python:pip.bzl", "pip_parse")
+
+pip_parse(
+    name = "cost_estimation_deps",
+    requirements_lock = "//tools/cost_estimation:requirements_lock.txt",
+)
+
+load("@cost_estimation_deps//:requirements.bzl", cost_estimation_install_deps = "install_deps")
+
+cost_estimation_install_deps()
+
 http_archive(
     name = "libevent",
     build_file = "//third_party:libevent.BUILD",
@@ -165,3 +166,18 @@ http_archive(
     urls = ["https://github.com/anweiss/cddl/archive/refs/tags/0.9.4.zip"],
     workspace_file = "//third_party/cddl:WORKSPACE",
 )
+
+http_archive(
+    name = "com_google_cpp_proto_builder",
+    patch_args = ["-p1"],
+    patches = [
+        "//third_party:cpp_proto_builder/cpp_proto_builder.patch",
+    ],
+    sha256 = "d36865e2d4e36856b9117b59ef3eab27b92e623418ab9a531c80fee9e1ad521d",
+    strip_prefix = "cpp-proto-builder-0.1.0",
+    urls = ["https://github.com/google/cpp-proto-builder/archive/refs/tags/v0.1.0.zip"],
+)
+
+load("@com_google_cpp_proto_builder//:workspace.bzl", "init_cpp_pb_external_repositories")
+
+init_cpp_pb_external_repositories()

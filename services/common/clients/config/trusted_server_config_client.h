@@ -85,6 +85,9 @@ class TrustedServersConfigClient {
   // Fetches the int64 value for the specified config parameter.
   int64_t GetInt64Parameter(absl::string_view name) const noexcept;
 
+  // Fetches the double value for the specified config parameter.
+  double GetDoubleParameter(absl::string_view name) const noexcept;
+
   // Fetches custom flag value for the specified config parameter.
   template <typename T>
   T GetCustomParameter(absl::string_view name) const noexcept {
@@ -129,7 +132,7 @@ class TrustedServersConfigClient {
   // method may be overriden.
   void SetOverride(absl::string_view flag_value,
                    absl::string_view config_name) {
-    PS_LOG(INFO) << absl::StrFormat(
+    PS_LOG(INFO, SystemLogContext()) << absl::StrFormat(
         "Overriding flag (flag name: %s, overriden value: %s)", config_name,
         flag_value);
     config_entries_map_[config_name] = flag_value;

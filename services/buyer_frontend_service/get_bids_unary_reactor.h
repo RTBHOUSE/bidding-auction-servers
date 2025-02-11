@@ -43,6 +43,7 @@
 #include "services/common/util/async_task_tracker.h"
 #include "services/common/util/cancellation_wrapper.h"
 #include "services/common/util/client_contexts.h"
+#include "src/concurrent/executor.h"
 #include "src/encryption/key_fetcher/interface/key_fetcher_manager_interface.h"
 
 namespace privacy_sandbox::bidding_auction_servers {
@@ -60,6 +61,19 @@ inline constexpr std::array<std::pair<std::string_view, std::string_view>, 3>
 inline constexpr absl::string_view kInvalidCompressionHeaderValue =
     "Invalid value provided for B&A compression type header";
 
+inline constexpr char kCheckBiddingSignalsFetchFlagV1ErrorMsg[] =
+    "Definite logical error: Called V1 function to get bidding signals despite "
+    "BIDDING_SIGNALS_FETCH_MODE being NOT_FETCHED.";
+inline constexpr char kCheckBiddingSignalsFetchFlagV2ErrorMsg[] =
+    "Definite logical error: Called V2 function to get bidding signals despite "
+    "BIDDING_SIGNALS_FETCH_MODE being NOT_FETCHED.";
+inline constexpr char kCheckBiddingSignalsProviderV1ErrorMsg[] =
+    "Definite logical error: Called V1 function to get bidding signals despite "
+    "the bidding signals async provider being nullptr.";
+inline constexpr char kCheckBiddingSignalsProviderV2ErrorMsg[] =
+    "Definite logical error: Called V2 function to get bidding signals despite "
+    "the kv async client being nullptr.";
+
 inline constexpr int kMinChaffRequestDurationMs = 25;
 inline constexpr int kMaxChaffRequestDurationMs = 380;
 inline constexpr int kMinChaffResponseSizeBytes = 1000;
@@ -75,22 +89,26 @@ class GetBidsUnaryReactor : public grpc::ServerUnaryReactor {
       grpc::CallbackServerContext& context,
       const GetBidsRequest& get_bids_request,
       GetBidsResponse& get_bids_response,
-      BiddingSignalsAsyncProvider& bidding_signals_async_provider,
+      absl::Nullable<const BiddingSignalsAsyncProvider* const>
+          bidding_signals_async_provider,
       BiddingAsyncClient& bidding_async_client, const GetBidsConfig& config,
       server_common::KeyFetcherManagerInterface* key_fetcher_manager,
       CryptoClientWrapperInterface* crypto_client,
-      KVAsyncClient* kv_async_client, bool enable_benchmarking = false);
+      KVAsyncClient* kv_async_client, server_common::Executor& executor,
+      bool enable_benchmarking = false);
 
   explicit GetBidsUnaryReactor(
       grpc::CallbackServerContext& context,
       const GetBidsRequest& get_bids_request,
       GetBidsResponse& get_bids_response,
-      const BiddingSignalsAsyncProvider& bidding_signals_async_provider,
+      absl::Nullable<const BiddingSignalsAsyncProvider* const>
+          bidding_signals_async_provider,
       BiddingAsyncClient& bidding_async_client, const GetBidsConfig& config,
       ProtectedAppSignalsBiddingAsyncClient* pas_bidding_async_client,
       server_common::KeyFetcherManagerInterface* key_fetcher_manager,
       CryptoClientWrapperInterface* crypto_client,
-      KVAsyncClient* kv_async_client, bool enable_benchmarking = false);
+      KVAsyncClient* kv_async_client, server_common::Executor& executor,
+      bool enable_benchmarking = false);
 
   // GetBidsUnaryReactor is neither copyable nor movable.
   GetBidsUnaryReactor(const GetBidsUnaryReactor&) = delete;
@@ -168,10 +186,10 @@ class GetBidsUnaryReactor : public grpc::ServerUnaryReactor {
 
   // Helper classes for performing preload actions.
   // These are not owned by this class.
-  const BiddingSignalsAsyncProvider* bidding_signals_async_provider_;
+  absl::Nullable<const BiddingSignalsAsyncProvider* const>
+      bidding_signals_async_provider_;
 
   KVAsyncClient* kv_async_client_;
-  int ad_bids_retrieval_timeout_ms_;
 
   BiddingAsyncClient* bidding_async_client_;
   // PAS bidding client should only be set by the caller if the feature is
@@ -214,6 +232,7 @@ class GetBidsUnaryReactor : public grpc::ServerUnaryReactor {
 
   const bool enable_cancellation_;
   const bool enable_enforce_kanon_;
+  const BiddingSignalsFetchMode bidding_signals_fetch_mode_;
 
   // Gets Protected Audience Bids.
   void MayGetProtectedAudienceBids();
@@ -233,7 +252,8 @@ class GetBidsUnaryReactor : public grpc::ServerUnaryReactor {
   void MayGetProtectedAudienceBidsV2(
       const BiddingSignalsRequest& bidding_signals_request);
   void HandleV2Failure(const absl::Status& status,
-                       absl::string_view error_message);
+                       absl::string_view error_message,
+                       EventMessage::KvSignal bid_signal);
 
   // Compression used in the request object; the response will use the same.
   CompressionType compression_type_;
@@ -243,6 +263,14 @@ class GetBidsUnaryReactor : public grpc::ServerUnaryReactor {
   // after it is intially set, its fields may be moved; see the struct
   // definition for more specifics on its usage and fields.
   BiddingSignalJsonComponents bidding_signal_json_components_;
+
+  // JSON map of the priority signals supplied by SSP.
+  rapidjson::Document priority_signals_vector_;
+
+  // Should the debug data be exported based on reply from bidding
+  bool should_export_debug_ = false;
+
+  server_common::Executor& executor_;
 };
 
 }  // namespace privacy_sandbox::bidding_auction_servers

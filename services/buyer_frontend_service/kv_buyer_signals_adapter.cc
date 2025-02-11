@@ -18,23 +18,24 @@
 
 #include "rapidjson/document.h"
 #include "rapidjson/stringbuffer.h"
+#include "services/common/clients/kv_server/kv_v2.h"
 #include "services/common/util/json_util.h"
 #include "src/util/status_macro/status_macros.h"
 
+// TODO(b/369379352): Move under //services/buyer_frontend_service/providers
 namespace privacy_sandbox::bidding_auction_servers {
 
 using kv_server::UDFArgument;
 using std::vector;
 
 namespace {
-inline constexpr char kKeyGroupOutputs[] = "keyGroupOutputs";
-inline constexpr char kTags[] = "tags";
 inline constexpr char kKeys[] = "keys";
-inline constexpr char kKeyValues[] = "keyValues";
+inline constexpr char kInterestGroupNames[] = "interestGroupNames";
 inline constexpr char kClient[] = "Bna.PA.Buyer.20240930";
 inline constexpr char kHostname[] = "hostname";
 inline constexpr char kClientType[] = "client_type";
 inline constexpr char kExperimentGroupId[] = "experiment_group_id";
+inline constexpr char kBuyerSignals[] = "buyer_signals";
 
 kv_server::v2::GetValuesRequest GetRequest(
     const GetBidsRequest::GetBidsRawRequest& get_bids_raw_request) {
@@ -51,9 +52,9 @@ kv_server::v2::GetValuesRequest GetRequest(
   return req;
 }
 
-UDFArgument BuildArgument(vector<std::string> keys) {
+UDFArgument BuildArgument(std::string tag, vector<std::string> keys) {
   UDFArgument arg;
-  arg.mutable_tags()->add_values()->set_string_value(kKeys);
+  arg.mutable_tags()->add_values()->set_string_value(std::move(tag));
   auto* key_list = arg.mutable_data()->mutable_list_value();
   for (auto& key : keys) {
     key_list->add_values()->set_string_value(std::move(key));
@@ -61,7 +62,7 @@ UDFArgument BuildArgument(vector<std::string> keys) {
   return arg;
 }
 
-absl::Status ValidateInterestGroups(const BuyerInput& buyer_input) {
+absl::Status ValidateInterestGroups(const BuyerInputForBidding& buyer_input) {
   if (buyer_input.interest_groups().empty()) {
     return absl::InvalidArgumentError("No interest groups in the buyer input");
   }
@@ -78,86 +79,19 @@ absl::Status ValidateInterestGroups(const BuyerInput& buyer_input) {
 
 absl::StatusOr<std::unique_ptr<BiddingSignals>> ConvertV2BiddingSignalsToV1(
     std::unique_ptr<kv_server::v2::GetValuesResponse> response) {
-  rapidjson::Document ig_signals(rapidjson::kObjectType);
-  std::vector<rapidjson::Document> docs;
-  docs.reserve(response->compression_groups().size());
-
-  // ParseJsonString doesn't copy, it creates a Document that points to the
-  // underlying string. We no longer need the response object, so we are ok to
-  // directly move the strings from it to the `ig_signals`. However, a doc
-  // object for each compression group must exist until SerializeJsonDoc is
-  // called. Otherwise the chain of pointers is broken and we get undefined
-  // behavior.
-  for (auto& group : response->compression_groups()) {
-    PS_ASSIGN_OR_RETURN(auto json, ParseJsonString(group.content()));
-    docs.push_back(std::move(json));
-  }
-
-  int compression_group_index = 0;
-  for (auto& json : docs) {
-    if (!json.IsArray()) {
-      return absl::InvalidArgumentError(absl::StrFormat(
-          "Incorrrectly formed compression group. Array was expected. "
-          "Compression group id %i",
-          compression_group_index));
-    }
-    for (auto& partition_output : json.GetArray()) {
-      if (!partition_output.IsObject()) {
-        return absl::InvalidArgumentError(absl::StrFormat(
-            "Incorrrectly formed compression group. Compression group id %i",
-            compression_group_index));
-      }
-      auto&& po = partition_output.GetObject();
-      auto key_group_outputs = po.FindMember(kKeyGroupOutputs);
-      if (!(key_group_outputs != po.MemberEnd() &&
-            key_group_outputs->value.IsArray())) {
-        return absl::InvalidArgumentError(absl::StrFormat(
-            "Incorrrectly formed compression group. Compression group id %i",
-            compression_group_index));
-      }
-      for (auto& key_group_output : key_group_outputs->value.GetArray()) {
-        auto tags = key_group_output.FindMember(kTags);
-        if (tags == key_group_output.MemberEnd() || tags->value.Size() != 1 ||
-            std::strcmp(tags->value[0].GetString(), kKeys) != 0) {
-          continue;
-        }
-        auto key_values = key_group_output.FindMember(kKeyValues);
-        if (key_values == key_group_output.MemberEnd() ||
-            !(key_values->value.IsObject())) {
-          return absl::InvalidArgumentError(absl::StrFormat(
-              "Incorrrectly formed compression group. Compression group id %i",
-              compression_group_index));
-        }
-        for (auto& key_value_pair : key_values->value.GetObject()) {
-          if (ig_signals.FindMember(key_value_pair.name) ==
-              ig_signals.MemberEnd()) {
-            ig_signals.AddMember(key_value_pair.name,
-                                 key_value_pair.value.Move(),
-                                 ig_signals.GetAllocator());
-          } else {
-            PS_VLOG(8)
-                << __func__
-                << "Key value response has multiple different values assosiated"
-                   "with the same key: "
-                << key_value_pair.name.GetString();
-          }
-        }
-      }
-    }
-    compression_group_index++;
-  }
-  rapidjson::Document top_level_doc(rapidjson::kObjectType);
-  top_level_doc.AddMember(kKeys, ig_signals.Move(),
-                          top_level_doc.GetAllocator());
-  PS_ASSIGN_OR_RETURN(auto trusted_signals, SerializeJsonDoc(top_level_doc));
+  PS_ASSIGN_OR_RETURN(
+      auto trusted_signals,
+      ConvertKvV2ResponseToV1String({kKeys, kInterestGroupNames}, *response));
   return std::make_unique<BiddingSignals>(BiddingSignals{
       std::make_unique<std::string>(std::move(trusted_signals))});
 }
 
 absl::StatusOr<std::unique_ptr<kv_server::v2::GetValuesRequest>>
-CreateV2BiddingRequest(const BiddingSignalsRequest& bidding_signals_request) {
+CreateV2BiddingRequest(const BiddingSignalsRequest& bidding_signals_request,
+                       bool propagate_buyer_signals_to_tkv) {
   auto& bids_request = bidding_signals_request.get_bids_raw_request_;
-  PS_RETURN_IF_ERROR(ValidateInterestGroups(bids_request.buyer_input()));
+  PS_RETURN_IF_ERROR(
+      ValidateInterestGroups(bids_request.buyer_input_for_bidding()));
   std::unique_ptr<kv_server::v2::GetValuesRequest> req =
       std::make_unique<kv_server::v2::GetValuesRequest>(
           GetRequest(bids_request));
@@ -166,15 +100,22 @@ CreateV2BiddingRequest(const BiddingSignalsRequest& bidding_signals_request) {
         bids_request.consented_debug_config();
   }
   { *req->mutable_log_context() = bids_request.log_context(); }
+  if (propagate_buyer_signals_to_tkv) {
+    (*req->mutable_metadata()->mutable_fields())[kBuyerSignals]
+        .set_string_value(bids_request.buyer_signals());
+  }
+
   int compression_and_partition_id = 0;
   // TODO (b/369181315): this needs to be reworked to include multiple IGs's
   // keys per partition.
-  for (auto& ig : bids_request.buyer_input().interest_groups()) {
+  for (auto& ig : bids_request.buyer_input_for_bidding().interest_groups()) {
     kv_server::v2::RequestPartition* partition = req->add_partitions();
+    *partition->add_arguments() =
+        BuildArgument(kInterestGroupNames, {ig.name()});
     for (auto& key : ig.bidding_signals_keys()) {
       std::vector<std::string> keys;
       keys.push_back(key);
-      *partition->add_arguments() = BuildArgument(std::move(keys));
+      *partition->add_arguments() = BuildArgument(kKeys, std::move(keys));
       partition->set_id(compression_and_partition_id);
       partition->set_compression_group_id(compression_and_partition_id);
     }

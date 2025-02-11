@@ -19,6 +19,7 @@
 #include "services/common/constants/user_error_strings.h"
 #include "services/common/util/cancellation_wrapper.h"
 #include "services/common/util/request_response_constants.h"
+#include "services/seller_frontend_service/k_anon/k_anon_utils.h"
 #include "services/seller_frontend_service/util/validation_utils.h"
 #include "src/util/status_macro/status_util.h"
 
@@ -39,20 +40,41 @@ absl::string_view GetGenerationId(
 }  // namespace
 
 void SelectAuctionResultReactor::SetLoggingContextWithProtectedAuctionInput() {
-  log_context_.Update(
-      std::visit(
-          [this](const auto& protected_input)
-              -> absl::btree_map<std::string, std::string> {
-            return {
+  std::visit(
+      [this](auto& protected_input) mutable {
+        is_sampled_for_debug_ = SetGeneratorAndSample(
+            config_client_.GetIntParameter(DEBUG_SAMPLE_RATE_MICRO),
+            /*chaffing_enabled=*/false,
+            request_->client_type() == CLIENT_TYPE_ANDROID &&
+                protected_input.enable_unlimited_egress(),
+            protected_input.generation_id(), generator_);
+
+        if (config_client_.GetBooleanParameter(CONSENT_ALL_REQUESTS)) {
+          ModifyConsent(*protected_input.mutable_consented_debug_config());
+        }
+        log_context_.Update(
+            // -> absl::btree_map<std::string, std::string> {
+            {
                 {kGenerationId, protected_input.generation_id()},
-                {kSellerDebugId, request_->auction_config().seller_debug_id()}};
-          },
-          protected_auction_input_),
-      std::visit(
-          [](const auto& protected_input) {
-            return protected_input.consented_debug_config();
-          },
-          protected_auction_input_));
+                {kSellerDebugId, request_->auction_config().seller_debug_id()},
+            },
+            protected_input.consented_debug_config(), is_sampled_for_debug_);
+
+        if (server_common::log::PS_VLOG_IS_ON(kPlain)) {
+          PS_VLOG(kPlain, log_context_)
+              << "Headers:\n"
+              << absl::StrJoin(
+                     request_context_->client_metadata(), "\n",
+                     absl::PairFormatter(absl::StreamFormatter(), " : ",
+                                         absl::StreamFormatter()));
+          log_context_.SetEventMessageField(protected_input);
+          PS_VLOG(kPlain, log_context_)
+              << (is_protected_auction_request_ ? "ProtectedAuctionInput"
+                                                : "ProtectedAudienceInput")
+              << " exported in EventMessage if consented" << "\n";
+        }
+      },
+      protected_auction_input_);
 }
 
 void SelectAuctionResultReactor::LogRequestMetrics() {
@@ -78,12 +100,13 @@ void SelectAuctionResultReactor::ScoreAds(
     return;
   }
 
-  auto raw_request = CreateTopLevelScoreAdsRawRequest(
-      request_->auction_config(), protected_auction_input_,
-      component_auction_results);
+  std::unique_ptr<ScoreAdsRequest::ScoreAdsRawRequest> raw_request =
+      CreateTopLevelScoreAdsRawRequest(request_->auction_config(),
+                                       protected_auction_input_,
+                                       component_auction_results);
+  raw_request->set_is_sampled_for_debug(is_sampled_for_debug_);
   PS_VLOG(kOriginated, log_context_) << "\nScoreAdsRawRequest:\n"
                                      << raw_request->DebugString();
-  std::string x = raw_request->DebugString();
   auto auction_request_metric =
       metric::MakeInitiatedRequest(metric::kAs, metric_context_.get())
           .release();
@@ -150,27 +173,47 @@ void SelectAuctionResultReactor::OnScoreAdsDone(
   } else {
     // Map AdScore to AuctionResult
     const auto& score_ad_response = *response;
+    should_export_debug_ = score_ad_response->auction_export_debug();
     if (score_ad_response->has_debug_info()) {
       server_common::DebugInfo& auction_log =
           *response_->mutable_debug_info()->add_downstream_servers();
       auction_log = std::move(*score_ad_response->mutable_debug_info());
       auction_log.set_server_name("auction");
     }
-    if (score_ad_response->has_ad_score() &&
-        score_ad_response->ad_score().buyer_bid() > 0) {
-      // Set metric signals for winner, used to collect
-      // metrics for requests with winners.
-      metric_context_->SetCustomState(kWinningAuctionAd, "");
+    const bool has_winner = score_ad_response->has_ad_score() &&
+                            score_ad_response->ad_score().buyer_bid() > 0;
+    const bool has_ghost_winners =
+        !score_ad_response->ghost_winning_ad_scores().empty();
+    PS_VLOG(5, log_context_) << "has_winner: " << has_winner
+                             << ", has_ghost_winners: " << has_ghost_winners
+                             << ", enable_kanon_: " << enable_kanon_;
+    if (has_winner || (enable_kanon_ && has_ghost_winners)) {
+      if (has_winner) {
+        // Set metric signals for winner, used to collect
+        // metrics for requests with winners.
+        metric_context_->SetCustomState(kWinningAuctionAd, "");
+      }
 
-      FinishWithResponse(CreateWinningAuctionResultCiphertext(
+      std::unique_ptr<KAnonAuctionResultData> kanon_data = nullptr;
+      if (enable_kanon_ && has_ghost_winners) {
+        kanon_data =
+            std::make_unique<KAnonAuctionResultData>(GetKAnonAuctionResultData(
+                has_winner ? score_ad_response->mutable_ad_score() : nullptr,
+                *score_ad_response->mutable_ghost_winning_ad_scores(),
+                log_context_));
+      }
+
+      FinishWithResponse(CreateNonChaffAuctionResultCiphertext(
+          request_->auction_config().ad_auction_result_nonce(),
           score_ad_response->ad_score(),
           GetBuyerIgsWithBidsMap(component_auction_bidding_groups_),
           component_auction_update_groups_, request_->client_type(),
-          *decrypted_request_, log_context_));
+          *decrypted_request_, log_context_, std::move(kanon_data)));
       return;
     }
   }
   FinishWithResponse(CreateChaffAuctionResultCiphertext(
+      request_->auction_config().ad_auction_result_nonce(),
       request_->client_type(), *decrypted_request_, log_context_));
 }
 
@@ -188,6 +231,8 @@ void SelectAuctionResultReactor::FinishWithStatus(const grpc::Status& status) {
     LogIfError(metric_context_->LogHistogram<metric::kSfeWithWinnerTimeMs>(
         static_cast<int>((absl::Now() - start_) / absl::Milliseconds(1))));
   }
+  log_context_.ExportEventMessage(/*if_export_consented=*/true,
+                                  should_export_debug_);
   Finish(status);
 }
 
@@ -211,9 +256,9 @@ void SelectAuctionResultReactor::FinishWithClientVisibleErrors(
   AuctionResult::Error auction_error;
   auction_error.set_code(static_cast<int>(ErrorCode::CLIENT_SIDE));
   auction_error.set_message(message);
-  FinishWithResponse(
-      CreateErrorAuctionResultCiphertext(auction_error, request_->client_type(),
-                                         *decrypted_request_, log_context_));
+  FinishWithResponse(CreateErrorAuctionResultCiphertext(
+      request_->auction_config().ad_auction_result_nonce(), auction_error,
+      request_->client_type(), *decrypted_request_, log_context_));
 }
 
 void SelectAuctionResultReactor::FinishWithServerVisibleErrors(
@@ -308,6 +353,12 @@ void SelectAuctionResultReactor::Execute() {
     return;
   }
 
+  if (server_common::log::PS_VLOG_IS_ON(kPlain)) {
+    log_context_.SetEventMessageField(component_auction_results);
+    PS_VLOG(kPlain, log_context_)
+        << "component auction results exported in EventMessage if consented";
+  }
+
   // Keep bidding groups for adding to response.
   for (auto& car : component_auction_results) {
     component_auction_bidding_groups_.push_back(
@@ -330,7 +381,9 @@ void SelectAuctionResultReactor::OnCancel() { client_contexts_.CancelAll(); }
 SelectAuctionResultReactor::SelectAuctionResultReactor(
     grpc::CallbackServerContext* context, const SelectAdRequest* request,
     SelectAdResponse* response, const ClientRegistry& clients,
-    const TrustedServersConfigClient& config_client, bool enable_cancellation)
+    const TrustedServersConfigClient& config_client, bool enable_cancellation,
+    bool enable_buyer_private_aggregate_reporting,
+    int per_adtech_paapi_contributions_limit, bool enable_kanon)
     : request_context_(context),
       request_(request),
       response_(response),
@@ -341,7 +394,8 @@ SelectAuctionResultReactor::SelectAuctionResultReactor(
       log_context_({}, server_common::ConsentedDebugConfiguration(),
                    [this]() { return response_->mutable_debug_info(); }),
       error_accumulator_(&log_context_),
-      enable_cancellation_(enable_cancellation) {
+      enable_cancellation_(enable_cancellation),
+      enable_kanon_(enable_kanon) {
   seller_domain_ = config_client_.GetStringParameter(SELLER_ORIGIN_DOMAIN);
   CHECK_OK([this]() {
     PS_ASSIGN_OR_RETURN(metric_context_,

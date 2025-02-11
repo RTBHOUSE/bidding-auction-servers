@@ -75,6 +75,7 @@ PostAuctionSignals GeneratePostAuctionSignalsForTopLevelSeller(
             /*DefaultWinningBidCurrency=*/kUnknownBidCurrencyCode,
             /*winning_bid_in_seller_currency=*/kDefaultWinningBid,
             kUnknownBidCurrencyCode,
+            /*seller_data_version=*/0,
             /*DefaultHighestScoringOtherBid=*/0.0,
             /*DefaultHighestScoringOtherBidCurrency=*/kUnknownBidCurrencyCode,
             kDefaultHighestScoringOtherBidInterestGroupOwner,
@@ -92,6 +93,7 @@ PostAuctionSignals GeneratePostAuctionSignalsForTopLevelSeller(
           /*DefaultWinningBidCurrency=*/kUnknownBidCurrencyCode,
           /*winning_bid_in_seller_currency=*/kDefaultWinningBid,
           kUnknownBidCurrencyCode,
+          /*seller_data_version=*/0,
           /*DefaultHighestScoringOtherBid=*/0.0,
           /*DefaultHighestScoringOtherBidCurrency=*/kUnknownBidCurrencyCode,
           kDefaultHighestScoringOtherBidInterestGroupOwner,
@@ -103,7 +105,7 @@ PostAuctionSignals GeneratePostAuctionSignalsForTopLevelSeller(
 
 PostAuctionSignals GeneratePostAuctionSignals(
     const std::optional<ScoreAdsResponse::AdScore>& winning_ad_score,
-    std::string seller_currency) {
+    std::string seller_currency, const uint32_t seller_data_version) {
   // If there is no winning ad, return with default signals values.
   if (!winning_ad_score) {
     return {kDefaultWinningInterestGroupName,
@@ -112,6 +114,7 @@ PostAuctionSignals GeneratePostAuctionSignals(
             /*DefaultWinningBidCurrency=*/kUnknownBidCurrencyCode,
             /*winning_bid_in_seller_currency=*/kDefaultWinningBid,
             std::move(seller_currency),
+            seller_data_version,
             /*DefaultHighestScoringOtherBid=*/0.0,
             /*DefaultHighestScoringOtherBidCurrency=*/kUnknownBidCurrencyCode,
             kDefaultHighestScoringOtherBidInterestGroupOwner,
@@ -180,6 +183,7 @@ PostAuctionSignals GeneratePostAuctionSignals(
           bid_currency,
           winning_bid_in_seller_currency,
           std::move(seller_currency),
+          seller_data_version,
           highest_scoring_other_bid,
           highest_scoring_other_bid_currency,
           std::move(highest_scoring_other_bid_ig_owner),
@@ -192,14 +196,27 @@ PostAuctionSignals GeneratePostAuctionSignals(
 
 HTTPRequest CreateDebugReportingHttpRequest(
     absl::string_view url, const DebugReportingPlaceholder& placeholder_data,
-    bool is_win_debug_url) {
+    bool is_winning_interest_group) {
+  HTTPRequest http_request;
+  http_request.url = CreateDebugReportingUrlForInterestGroup(
+      url, placeholder_data, is_winning_interest_group);
+  http_request.headers = {};
+  return http_request;
+}
+
+std::string CreateDebugReportingUrlForInterestGroup(
+    absl::string_view debug_url,
+    const DebugReportingPlaceholder& placeholder_data,
+    bool is_winning_interest_group) {
   std::vector<std::pair<absl::string_view, std::string>> replacements;
   replacements.reserve(
       kNumDebugReportingReplacements +
-      (is_win_debug_url ? kNumAdditionalWinReportingReplacements : 0));
+      (is_winning_interest_group ? kNumAdditionalWinReportingReplacements : 0));
   replacements.push_back(
       {kWinningBidPlaceholder,
        absl::StrFormat("%.2f", placeholder_data.winning_bid)});
+  replacements.push_back(
+      {kWinningBidCurrencyPlaceholder, placeholder_data.winning_bid_currency});
   replacements.push_back(
       {kMadeWinningBidPlaceholder,
        placeholder_data.made_winning_bid ? "true" : "false"});
@@ -208,10 +225,12 @@ HTTPRequest CreateDebugReportingHttpRequest(
                                      placeholder_data.rejection_reason))});
   replacements.push_back(
       {kHighestScoringOtherBidPlaceholder, kDefaultHighestScoringOtherBid});
+  replacements.push_back({kHighestScoringOtherBidCurrencyPlaceholder,
+                          placeholder_data.highest_scoring_other_bid_currency});
   replacements.push_back({kMadeHighestScoringOtherBidPlaceholder,
                           kDefaultHasHighestScoringOtherBid});
   // Only pass the second highest scored bid information to the winner.
-  if (is_win_debug_url) {
+  if (is_winning_interest_group) {
     replacements.push_back(
         {kHighestScoringOtherBidPlaceholder,
          absl::StrFormat("%.2f", placeholder_data.highest_scoring_other_bid)});
@@ -219,10 +238,7 @@ HTTPRequest CreateDebugReportingHttpRequest(
         {kMadeHighestScoringOtherBidPlaceholder,
          placeholder_data.made_highest_scoring_other_bid ? "true" : "false"});
   }
-  HTTPRequest http_request;
-  http_request.url = absl::StrReplaceAll(url, replacements);
-  http_request.headers = {};
-  return http_request;
+  return absl::StrReplaceAll(debug_url, replacements);
 }
 
 DebugReportingPlaceholder GetPlaceholderDataForInterestGroup(
@@ -302,6 +318,9 @@ SellerRejectionReason ToSellerRejectionReason(
   } else if (kRejectionReasonBidFromScoreAdFailedCurrencyCheck ==
              rejection_reason_str) {
     return SellerRejectionReason::BID_FROM_SCORE_AD_FAILED_CURRENCY_CHECK;
+  } else if (kRejectionReasonDidNotMeetTheKAnonymityThreshold ==
+             rejection_reason_str) {
+    return SellerRejectionReason::DID_NOT_MEET_THE_KANONYMITY_THRESHOLD;
   } else {
     return SellerRejectionReason::SELLER_REJECTION_REASON_NOT_AVAILABLE;
   }
@@ -328,6 +347,8 @@ absl::string_view ToSellerRejectionReasonString(
       return kRejectionReasonBidFromGenBidFailedCurrencyCheck;
     case SellerRejectionReason::BID_FROM_SCORE_AD_FAILED_CURRENCY_CHECK:
       return kRejectionReasonBidFromScoreAdFailedCurrencyCheck;
+    case SellerRejectionReason::DID_NOT_MEET_THE_KANONYMITY_THRESHOLD:
+      return kRejectionReasonDidNotMeetTheKAnonymityThreshold;
     default:
       return kRejectionReasonNotAvailable;
   }

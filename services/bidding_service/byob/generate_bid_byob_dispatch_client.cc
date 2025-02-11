@@ -18,6 +18,7 @@
 #include <memory>
 
 #include "absl/synchronization/notification.h"
+#include "services/common/loggers/request_log_context.h"
 #include "src/util/status_macro/status_macros.h"
 
 namespace privacy_sandbox::bidding_auction_servers {
@@ -28,9 +29,8 @@ absl::StatusOr<GenerateBidByobDispatchClient>
 GenerateBidByobDispatchClient::Create(int num_workers) {
   PS_ASSIGN_OR_RETURN(
       auto byob_service,
-      roma_service::ByobGenerateProtectedAudienceBidService<>::Create(
-          {.num_workers = num_workers}));
-  return GenerateBidByobDispatchClient(std::move(byob_service));
+      roma_service::ByobGenerateProtectedAudienceBidService<>::Create({}));
+  return GenerateBidByobDispatchClient(std::move(byob_service), num_workers);
 }
 
 absl::Status GenerateBidByobDispatchClient::LoadSync(std::string version,
@@ -51,44 +51,38 @@ absl::Status GenerateBidByobDispatchClient::LoadSync(std::string version,
 
   // Get UDF blob for the given code and register it with the BYOB service.
   PS_ASSIGN_OR_RETURN(UdfBlob udf_blob, UdfBlob::Create(std::move(code)));
-  absl::Notification notif;
-  absl::Status load_status;
   PS_ASSIGN_OR_RETURN(std::string new_code_token,
-                      byob_service_.Register(udf_blob(), notif, load_status));
-  // TODO(b/368624844): Make duration configurable by taking in this in Create.
-  notif.WaitForNotificationWithTimeout(absl::Seconds(120));
+                      byob_service_.Register(udf_blob(), num_workers_));
 
-  if (load_status.ok()) {
-    // Acquire lock before updating info about the most recently loaded code
-    // blob.
-    if (code_mutex_.TryLock()) {
-      code_token_ = std::move(new_code_token);
-      code_version_ = std::move(version);
-      code_hash_ = new_code_hash;
-      code_mutex_.Unlock();
-    }
+  // Acquire lock before updating info about the most recently loaded code
+  // blob.
+  if (code_mutex_.TryLock()) {
+    code_token_ = std::move(new_code_token);
+    code_version_ = std::move(version);
+    code_hash_ = new_code_hash;
+    code_mutex_.Unlock();
   }
-  return load_status;
+  return absl::OkStatus();
 }
 
-absl::StatusOr<
-    std::unique_ptr<roma_service::GenerateProtectedAudienceBidResponse>>
-GenerateBidByobDispatchClient::Execute(
+absl::Status GenerateBidByobDispatchClient::Execute(
     const roma_service::GenerateProtectedAudienceBidRequest& request,
-    absl::Duration timeout) {
-  absl::StatusOr<
-      std::unique_ptr<roma_service::GenerateProtectedAudienceBidResponse>>
-      response;
-  absl::Notification notif;
-  PS_ASSIGN_OR_RETURN(
-      auto execution_token,
-      byob_service_.GenerateProtectedAudienceBid(notif, request, response,
-                                                 /*metadata=*/{}, code_token_));
-  notif.WaitForNotificationWithTimeout(timeout);
-  if (!response.ok() || response.value() != nullptr) {
-    return response;
-  }
-  return absl::DeadlineExceededError(
-      "Deadline exceeded while running generateBid.");
+    absl::Duration timeout,
+    absl::AnyInvocable<
+        void(absl::StatusOr<
+             roma_service::GenerateProtectedAudienceBidResponse>) &&>
+        callback) {
+  PS_VLOG(kNoisyInfo) << "Dispatching GenerateBid Binary UDF";
+  // Start the call.
+  return byob_service_
+      .GenerateProtectedAudienceBid(
+          [callback = std::move(callback)](
+              absl::StatusOr<roma_service::GenerateProtectedAudienceBidResponse>
+                  response) mutable {
+            std::move(callback)(std::move(response));
+          },
+          request, /*metadata=*/{}, code_token_)
+      .status();
 }
+
 }  // namespace privacy_sandbox::bidding_auction_servers

@@ -79,6 +79,10 @@ AdWithBidMetadata GetTestAdWithBidMetadata(
     ad.set_buyer_and_seller_reporting_id(
         *test_score_ads_request_config.buyer_and_seller_reporting_id);
   }
+  if (test_score_ads_request_config.selected_buyer_and_seller_reporting_id) {
+    ad.set_selected_buyer_and_seller_reporting_id(
+        *test_score_ads_request_config.selected_buyer_and_seller_reporting_id);
+  }
   ad.set_bid_currency(kEurosIsoCode);
   ad.set_ad_cost(
       test_score_ads_request_config.test_buyer_reporting_signals.ad_cost);
@@ -97,6 +101,10 @@ AdWithBidMetadata GetTestAdWithBidMetadata(
       test_score_ads_request_config.test_buyer_reporting_signals.recency);
   ad.set_data_version(
       test_score_ads_request_config.test_buyer_reporting_signals.data_version);
+  ad.set_interest_group_idx(kTestIgIdx);
+  if (test_score_ads_request_config.k_anon_status) {
+    ad.set_k_anon_status(*test_score_ads_request_config.k_anon_status);
+  }
   return ad;
 }
 
@@ -108,10 +116,13 @@ ScoreAdsRequest BuildScoreAdsRequest(
   std::string trusted_scoring_signals =
       R"json({"renderUrls":{"placeholder_url":[123])json";
   for (const auto& ad : ads) {
-    raw_request.mutable_per_buyer_signals()->try_emplace(
-        ad.interest_group_owner(),
-        test_score_ads_request_config.test_buyer_reporting_signals
-            .buyer_signals);
+    if (!test_score_ads_request_config.test_buyer_reporting_signals
+             .buyer_signals.empty()) {
+      raw_request.mutable_per_buyer_signals()->try_emplace(
+          ad.interest_group_owner(),
+          test_score_ads_request_config.test_buyer_reporting_signals
+              .buyer_signals);
+    }
     std::string ad_signal = absl::StrFormat(
         "\"%s\":%s", ad.render(), R"JSON(["short", "test", "signal"])JSON");
     absl::StrAppend(&trusted_scoring_signals,
@@ -138,6 +149,8 @@ ScoreAdsRequest BuildScoreAdsRequest(
     raw_request.set_top_level_seller(
         test_score_ads_request_config.top_level_seller);
   }
+  raw_request.set_seller_data_version(
+      test_score_ads_request_config.seller_data_version);
   const auto& component_auction_data =
       test_score_ads_request_config.component_auction_data;
   // component_seller is expected to be set only for top level auctions.
@@ -146,6 +159,9 @@ ScoreAdsRequest BuildScoreAdsRequest(
         component_auction_data);
     *raw_request.mutable_component_auction_results()->Add() =
         std::move(auction_result);
+  }
+  if (test_score_ads_request_config.enforce_kanon) {
+    raw_request.set_enforce_kanon(*test_score_ads_request_config.enforce_kanon);
   }
   ScoreAdsRequest request;
   *request.mutable_request_ciphertext() = raw_request.SerializeAsString();
@@ -211,6 +227,8 @@ ScoreAdsRequest BuildScoreAdsRequestForPAS(
     raw_request.set_top_level_seller(
         test_score_ads_request_config.top_level_seller);
   }
+  raw_request.set_seller_data_version(
+      test_score_ads_request_config.seller_data_version);
   ScoreAdsRequest request;
   *request.mutable_request_ciphertext() = raw_request.SerializeAsString();
   request.set_key_id(kKeyId);
@@ -260,7 +278,9 @@ void LoadWrapperWithMockSellerUdf(
       auction_service_runtime_config.enable_report_result_url_generation,
       auction_service_runtime_config.enable_private_aggregate_reporting);
   ASSERT_TRUE(
-      dispatcher.LoadSync(kScoreAdBlobVersion, std::move(wrapper_js_blob))
+      dispatcher
+          .LoadSync(auction_service_runtime_config.default_score_ad_version,
+                    std::move(wrapper_js_blob))
           .ok());
 }
 
@@ -279,7 +299,8 @@ void LoadWrapperWithMockReportWinUdf(
   }
   for (const auto& ad_bid : raw_request.ad_bids()) {
     std::string wrapper_js_blob = GetBuyerWrappedCode(
-        buyer_udf, auction_service_runtime_config.enable_protected_app_signals);
+        buyer_udf, auction_service_runtime_config.enable_protected_app_signals,
+        auction_service_runtime_config.enable_private_aggregate_reporting);
     absl::StatusOr<std::string> version =
         GetBuyerReportWinVersion(ad_bid.interest_group_owner(), auction_type);
     ASSERT_TRUE(version.ok());
@@ -326,7 +347,7 @@ void RunTestScoreAds(
         return std::make_unique<ScoreAdsReactor>(
             context, client, request, response,
             std::make_unique<ScoreAdsNoOpLogger>(), key_fetcher_manager,
-            crypto_client, async_reporter_local.get(), runtime_config);
+            crypto_client, *async_reporter_local, runtime_config);
       };
 
   auto crypto_client = std::make_unique<MockCryptoClientWrapper>();

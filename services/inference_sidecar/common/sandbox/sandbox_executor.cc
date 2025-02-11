@@ -35,6 +35,7 @@
 #include "sandboxed_api/sandbox2/sandbox2.h"
 #include "sandboxed_api/sandbox2/util/bpf_helper.h"
 #include "sandboxed_api/util/runfiles.h"
+#include "utils/resource_size_utils.h"
 
 ABSL_FLAG(bool, testonly_disable_sandbox, false,
           "Disable sandbox restricted policies for testing purposes.");
@@ -149,6 +150,11 @@ void AllowTensorFlow(sandbox2::PolicyBuilder& builder) {
   builder.AllowReaddir();
 }
 
+void AllowAmx(sandbox2::PolicyBuilder& builder) {
+  // arch_prctl is required for Intel AMX.
+  builder.AllowSyscall(__NR_arch_prctl);
+}
+
 std::unique_ptr<sandbox2::Policy> MakePolicy() {
   if (absl::GetFlag(FLAGS_testonly_disable_sandbox)) {
     return sandbox2::PolicyBuilder()
@@ -166,6 +172,7 @@ std::unique_ptr<sandbox2::Policy> MakePolicy() {
   AllowAws(builder);
   AllowPyTorch(builder);
   AllowTensorFlow(builder);
+  AllowAmx(builder);
   builder.AllowStaticStartup().AllowLogForwarding();
 
   return builder.BuildOrDie();
@@ -194,11 +201,13 @@ std::string GetFilePath(absl::string_view relative_binary_path) {
 }
 
 SandboxExecutor::SandboxExecutor(absl::string_view binary_path,
-                                 const std::vector<std::string>& args) {
+                                 const std::vector<std::string>& args,
+                                 const int64_t rlimit_mb) {
   auto executor = std::make_unique<sandbox2::Executor>(binary_path, args);
   executor->limits()
       ->set_rlimit_cpu(RLIM64_INFINITY)
-      .set_rlimit_as(RLIM64_INFINITY)
+      .set_rlimit_as(rlimit_mb == 0 ? RLIM64_INFINITY
+                                    : GetByteSizeFromMb(rlimit_mb))
       .set_rlimit_core(0)
       .set_walltime_limit(absl::InfiniteDuration());
   executor->ipc()->EnableLogServer();

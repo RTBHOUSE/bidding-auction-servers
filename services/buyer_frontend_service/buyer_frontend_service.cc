@@ -33,36 +33,45 @@ BuyerFrontEndService::BuyerFrontEndService(
         key_fetcher_manager,
     std::unique_ptr<CryptoClientWrapperInterface> crypto_client,
     std::unique_ptr<KVAsyncClient> kv_async_client, const GetBidsConfig config,
-    bool enable_benchmarking)
+    server_common::Executor& executor, bool enable_benchmarking)
     : bidding_signals_async_provider_(
-          std::move(bidding_signals_async_provider)),
+          config.bidding_signals_fetch_mode ==
+                  BiddingSignalsFetchMode::NOT_FETCHED
+              ? nullptr
+              : std::move(bidding_signals_async_provider)),
       config_(config),
       enable_benchmarking_(enable_benchmarking),
       key_fetcher_manager_(std::move(key_fetcher_manager)),
       crypto_client_(std::move(crypto_client)),
-      stub_(Bidding::NewStub(
-          CreateChannel(client_config.server_addr, client_config.compression,
-                        client_config.secure_client,
-                        client_config.grpc_arg_default_authority))),
+      stub_(Bidding::NewStub(CreateChannel(
+          client_config.server_addr, client_config.compression,
+          client_config.secure_client, client_config.grpc_arg_default_authority,
+          client_config.ca_root_pem))),
       bidding_async_client_(std::make_unique<BiddingAsyncGrpcClient>(
           key_fetcher_manager_.get(), crypto_client_.get(), client_config,
           stub_.get())),
-      kv_async_client_(std::move(kv_async_client)) {
+      kv_async_client_(config.bidding_signals_fetch_mode ==
+                               BiddingSignalsFetchMode::NOT_FETCHED
+                           ? nullptr
+                           : std::move(kv_async_client)),
+      executor_(executor) {
   if (config_.is_protected_app_signals_enabled) {
     protected_app_signals_bidding_async_client_ =
         std::make_unique<ProtectedAppSignalsBiddingAsyncGrpcClient>(
             key_fetcher_manager_.get(), crypto_client_.get(), client_config,
             stub_.get());
   }
-  CHECK(config_.debug_sample_rate_micro >= 0 &&
-        config_.debug_sample_rate_micro <= 1'000'000);
 }
 
 BuyerFrontEndService::BuyerFrontEndService(ClientRegistry client_registry,
                                            const GetBidsConfig config,
+                                           server_common::Executor& executor,
                                            bool enable_benchmarking)
     : bidding_signals_async_provider_(
-          std::move(client_registry.bidding_signals_async_provider)),
+          config.bidding_signals_fetch_mode ==
+                  BiddingSignalsFetchMode::NOT_FETCHED
+              ? nullptr
+              : std::move(client_registry.bidding_signals_async_provider)),
       config_(config),
       enable_benchmarking_(enable_benchmarking),
       key_fetcher_manager_(std::move(client_registry.key_fetcher_manager)),
@@ -70,7 +79,11 @@ BuyerFrontEndService::BuyerFrontEndService(ClientRegistry client_registry,
       bidding_async_client_(std::move(client_registry.bidding_async_client)),
       protected_app_signals_bidding_async_client_(std::move(
           client_registry.protected_app_signals_bidding_async_client)),
-      kv_async_client_(std::move(client_registry.kv_async_client)) {}
+      kv_async_client_(config.bidding_signals_fetch_mode ==
+                               BiddingSignalsFetchMode::NOT_FETCHED
+                           ? nullptr
+                           : std::move(client_registry.kv_async_client)),
+      executor_(executor) {}
 
 grpc::ServerUnaryReactor* BuyerFrontEndService::GetBids(
     grpc::CallbackServerContext* context, const GetBidsRequest* request,
@@ -79,11 +92,11 @@ grpc::ServerUnaryReactor* BuyerFrontEndService::GetBids(
 
   // Will be deleted in onDone
   auto reactor = std::make_unique<GetBidsUnaryReactor>(
-      *context, *request, *response, *bidding_signals_async_provider_,
+      *context, *request, *response, bidding_signals_async_provider_.get(),
       *bidding_async_client_, config_,
       protected_app_signals_bidding_async_client_.get(),
       key_fetcher_manager_.get(), crypto_client_.get(), kv_async_client_.get(),
-      enable_benchmarking_);
+      executor_, enable_benchmarking_);
   reactor->Execute();
   return reactor.release();
 }

@@ -84,7 +84,7 @@ TEST(ParsePerInterestGroupData, SkipsNonObjectPerInterestGroupData) {
     "perInterestGroupData": 123
 }
     )JSON");
-  BuyerInput input;
+  BuyerInputForBidding input;
   auto output = ParseTrustedBiddingSignals(std::move(bidding_signals), input);
   EXPECT_TRUE(output.ok());
   EXPECT_TRUE(output->update_igs.interest_groups().empty());
@@ -92,10 +92,10 @@ TEST(ParsePerInterestGroupData, SkipsNonObjectPerInterestGroupData) {
 
 TEST(ParsePerInterestGroupData,
      ParsesUpdateInterestGroupDataInBuyerInputOrder) {
-  BuyerInput input;
-  BuyerInput::InterestGroup input_ig_first;
+  BuyerInputForBidding input;
+  BuyerInputForBidding::InterestGroupForBidding input_ig_first;
   input_ig_first.set_name("first");
-  BuyerInput::InterestGroup input_ig_second;
+  BuyerInputForBidding::InterestGroupForBidding input_ig_second;
   input_ig_second.set_name("second");
   *input.add_interest_groups() = std::move(input_ig_first);
   *input.add_interest_groups() = std::move(input_ig_second);
@@ -129,8 +129,8 @@ TEST(ParsePerInterestGroupData,
 }
 
 TEST(ParsePerInterestGroupData, SkipBadUpdateIfOlderThanMsValue) {
-  BuyerInput input;
-  BuyerInput::InterestGroup input_ig_first;
+  BuyerInputForBidding input;
+  BuyerInputForBidding::InterestGroupForBidding input_ig_first;
   input_ig_first.set_name("first");
   *input.add_interest_groups() = std::move(input_ig_first);
   auto bidding_signals = std::make_unique<BiddingSignals>();
@@ -151,6 +151,52 @@ TEST(ParsePerInterestGroupData, SkipBadUpdateIfOlderThanMsValue) {
       ParseTrustedBiddingSignals(std::move(bidding_signals), input);
   EXPECT_TRUE(parsed_bidding_signals.ok());
   EXPECT_TRUE(parsed_bidding_signals->update_igs.interest_groups().empty());
+}
+
+TEST(ParsePerInterestGroupData, ParsesPriorityVector) {
+  BuyerInputForBidding input;
+  BuyerInputForBidding::InterestGroupForBidding input_ig_first;
+  input_ig_first.set_name("first_ig_name");
+  BuyerInputForBidding::InterestGroupForBidding input_ig_second;
+  input_ig_second.set_name("second_ig_name");
+  *input.add_interest_groups() = std::move(input_ig_first);
+  *input.add_interest_groups() = std::move(input_ig_second);
+  auto bidding_signals = std::make_unique<BiddingSignals>();
+  bidding_signals->trusted_signals = std::make_unique<std::string>(
+      R"JSON(
+{
+    "keys": {},
+    "perInterestGroupData": {
+        "first_ig_name": {
+            "priorityVector": {
+              "entry1": 1.0,
+              "entry2": "NAN"
+            },
+            "updateIfOlderThanMs": 100
+        },
+        "second_ig_name": {
+            "priorityVector": {
+              "entry1": 100
+            },
+            "updateIfOlderThanMs": 200
+        }
+    }
+}
+  )JSON");
+
+  auto output = ParseTrustedBiddingSignals(std::move(bidding_signals), input);
+
+  EXPECT_TRUE(output.ok());
+  EXPECT_EQ(output->update_igs.interest_groups()[0].index(), 0);
+  EXPECT_EQ(output->update_igs.interest_groups()[1].index(), 1);
+  EXPECT_EQ(output->update_igs.interest_groups()[0].update_if_older_than_ms(),
+            100);
+  EXPECT_EQ(output->update_igs.interest_groups()[1].update_if_older_than_ms(),
+            200);
+  EXPECT_EQ(output->per_ig_priority_vectors["first_ig_name"]["entry1"], 1.0);
+  EXPECT_FALSE(
+      output->per_ig_priority_vectors["first_ig_name"].HasMember("entry2"));
+  EXPECT_EQ(output->per_ig_priority_vectors["second_ig_name"]["entry1"], 100.0);
 }
 
 }  // namespace
